@@ -1,0 +1,49 @@
+SPS BROWSER - THIRD-PARTY SOFTWARE
+===================================
+
+SPS Browser is built from, and ships with, the open-source and freely redistributable components below.
+Each component stays under its own licence; the full licence texts are available from the projects named here and,
+for many of them, as LICENSE files inside the "_internal" folder of the installed Program.
+The list is written to the best of our knowledge - the licence text published by each project is the one that counts.
+
+COMPONENT                              LICENCE (short)                         WEBSITE
+-------------------------------------  --------------------------------------  ------------------------------
+Python                                 Python Software Foundation License       python.org
+PyQt6                                  GPL v3 (or Riverbank commercial)         riverbankcomputing.com
+Qt 6 (Core, Gui, Widgets, Network...)  LGPL v3 / GPL v3 / commercial            qt.io
+Qt WebEngine                           LGPL v3 / GPL v3 / commercial            doc.qt.io/qt-6/qtwebengine-index.html
+Chromium (inside Qt WebEngine)         BSD-3-Clause and many other licences     chromium.org (see its credits list)
+psutil                                 BSD-3-Clause                             github.com/giampaolo/psutil
+requests                               Apache-2.0                               requests.readthedocs.io
+urllib3                                MIT                                      urllib3.readthedocs.io
+idna                                   BSD-3-Clause                             github.com/kjd/idna
+charset-normalizer                     MIT                                      github.com/jawah/charset_normalizer
+certifi                                MPL-2.0                                  github.com/certifi/python-certifi
+watchdog                               Apache-2.0                               github.com/gorakhargosh/watchdog
+llama-cpp-python (local AI)            MIT                                      github.com/abetlen/llama-cpp-python
+llama.cpp / ggml (local AI engine)     MIT                                      github.com/ggml-org/llama.cpp
+NumPy (with local AI)                  BSD-3-Clause (+ bundled libraries)       numpy.org
+diskcache (with local AI)              Apache-2.0                               grantjenks.com/docs/diskcache
+Jinja2 / MarkupSafe (with local AI)    BSD-3-Clause                             palletsprojects.com
+typing_extensions                      Python Software Foundation License       github.com/python/typing_extensions
+PyInstaller (used to build the exe)    GPL-2.0-or-later with a special          pyinstaller.org
+                                       exception that allows any program
+Inno Setup (the installer)             Inno Setup License (free, also for       jrsoftware.org
+                                       commercial use)
+Microsoft Visual C++ Redistributable   Microsoft redistributable licence terms  visualstudio.microsoft.com
+(installed silently when needed)
+
+AI MODELS (downloaded by the user - NOT included in the installer)
+-----------------------------------------------------------------------
+TinyLlama 1.1B Chat                    Apache-2.0
+Qwen2 1.5B Instruct                    Apache-2.0
+Qwen2.5-Coder 3B Instruct              Qwen Research License (read it before commercial use)
+Phi-3-mini 4k Instruct                 MIT
+Gemma 2 2B Instruct                    Gemma Terms of Use
+DeepSeek-R1-Distill-Qwen 1.5B          MIT
+Each model page on huggingface.co shows the current licence. Newer versions may change it.
+
+NOTE ON THE GPL
+---------------
+PyQt6 is available under the GPL v3. Because SPS Browser uses PyQt6, SPS Browser itself is distributed under the
+GPL v3 as well (see LICENSE.txt). Everyone who receives the Program may therefore also receive its source code.

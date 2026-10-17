@@ -1,0 +1,21 @@
+# ───────────── everything needed to BUILD SPS Browser (exact versions = reproducible builds) ─────────────
+# Install:   python -m pip install -r requirements-build.txt
+# Local AI (llama-cpp-python) is in requirements-ai.txt, optional text-to-speech in requirements-optional.txt.
+# The test tests/test_requirements.py fails if the code imports a library that is not listed in these files.
+
+# --- the browser itself (Qt + Chromium engine) ---
+PyQt6==6.11.0
+PyQt6-Qt6==6.11.2
+PyQt6-WebEngine==6.11.0
+PyQt6-WebEngine-Qt6==6.11.2
+PyQt6-sip==13.13.0
+
+# --- libraries the program imports ---
+psutil==7.2.2            # sandbox: process / file / network monitoring
+watchdog==6.0.0          # sandbox: file-system events
+requests==2.34.2         # updater, downloads, translate, model downloads
+certifi==2026.7.22       # HTTPS certificates (requests depends on it; pinned because it is bundled into the exe)
+
+# --- packaging tools ---
+pyinstaller>=6.10,<7
+pyinstaller-hooks-contrib
