@@ -211,6 +211,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     continue-on-error: true
     timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash          # Windows runners use PowerShell by default; these steps are written for bash
     strategy:
       fail-fast: false
       matrix:
