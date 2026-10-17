@@ -321,7 +321,7 @@ jobs:
             { echo "### Update block (paste into the Google Sites updates page as plain text)"; echo '```'; cat update_block.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
             echo "::notice::Signed update block is in the job summary of this run."
           fi
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@v4
         with:
           subject-path: release-files/*
       - uses: softprops/action-gh-release@v2
