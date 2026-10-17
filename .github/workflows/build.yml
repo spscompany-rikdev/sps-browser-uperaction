@@ -122,7 +122,7 @@ jobs:
       - name: Portable zip
         shell: pwsh
         run: Compress-Archive -Path dist\SPS_Browser -DestinationPath "installer\Output\SPS_Browser_Windows_x64_Portable_v$env:VERSION.zip"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows-x64
           path: installer/Output/*
@@ -157,7 +157,7 @@ jobs:
         run: |
           mkdir -p out
           tar -C dist -czf "out/SPS_Browser_Linux_x64_v${VERSION}.tar.gz" SPS_Browser
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux-x64
           path: out/*
@@ -198,7 +198,7 @@ jobs:
         run: |
           mkdir -p out
           ditto -c -k --sequesterRsrc --keepParent "dist/SPS Browser.app" "out/SPS_Browser_macOS_arm64_v${VERSION}.zip"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: macos-arm64
           path: out/*
@@ -248,7 +248,7 @@ jobs:
           else
             ditto -c -k --sequesterRsrc --keepParent "dist/SPS Browser.app" "out/SPS_Browser_${{ matrix.label }}_v${VERSION}.zip"
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: extra-${{ matrix.label }}
           path: out/*
