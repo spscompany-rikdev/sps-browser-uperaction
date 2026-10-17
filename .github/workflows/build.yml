@@ -267,7 +267,7 @@ jobs:
           path: extra-files
           merge-multiple: true
         continue-on-error: true
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: extra-files/*
           fail_on_unmatched_files: false
@@ -324,7 +324,7 @@ jobs:
       - uses: actions/attest-build-provenance@v2
         with:
           subject-path: release-files/*
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           name: SPS Browser ${{ env.VERSION }}
           body_path: release_notes.md
