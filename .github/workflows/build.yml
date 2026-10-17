@@ -1,0 +1,332 @@
+# ═══════════════════════════════════════════════════════════════════════════════════════
+#  SPS Browser - automatic build for Windows, Linux and macOS
+#
+#  WHEN IT RUNS
+#    * every push to the main branch ........ tests + builds, files appear under "Artifacts" of the run
+#    * every pull request ................... tests only
+#    * you push a tag like  v36.1.0 ......... tests + builds + creates a GitHub RELEASE with all downloads,
+#                                              SHA256SUMS and (if you added the secret) the signed update block
+#    * "Run workflow" button (Actions tab) .. same as a push; you may type a version
+#
+#  Windows is REQUIRED to succeed. Linux and macOS are best-effort (a failure there never blocks a release).
+# ═══════════════════════════════════════════════════════════════════════════════════════
+name: Build SPS Browser
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build, e.g. 36.1.0 (empty = the VERSION written in src/SPS_BROWSER.py)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+# A newer push must NOT kill a build that is already running (that cancelled the Windows installer step before).
+# Only pull-request builds are replaced by newer ones.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  PYTHON_VERSION: "3.12"
+  FORCE_COLOR: "0"
+
+jobs:
+  # ───────────────────────────── 1. which version are we building? ─────────────────────────────
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then V="${GITHUB_REF#refs/tags/v}"
+          elif [[ -n "$INPUT_VERSION" ]]; then V="$INPUT_VERSION"
+          else V="$(grep -oP '^VERSION\s*=\s*"\K[^"]+' src/SPS_BROWSER.py)"; fi
+          if [[ ! "$V" =~ ^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$ ]]; then echo "::error::bad version '$V' (use 36.1.0)"; exit 1; fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "Building SPS Browser $V"
+
+  # ───────────────────────────── 2. unit tests ─────────────────────────────
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-*.txt
+      - name: Linux libraries for Qt
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0 libdbus-1-3 \
+            libnss3 libxcomposite1 libxdamage1 libxrandr2 libxtst6 libxkbfile1 libasound2t64
+      - run: pip install -r requirements-build.txt
+      - name: Run all tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+          QTWEBENGINE_CHROMIUM_FLAGS: --no-sandbox
+        run: |
+          python -m unittest discover -s tests -p "test_*.py" -v
+
+  # ───────────────────────────── 3a. WINDOWS (installer + portable zip) ─────────────────────────────
+  windows:
+    needs: [meta, test]
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-*.txt
+      - run: python -m pip install -r requirements-build.txt
+      - name: Optional extras (text-to-speech for "Read aloud")
+        continue-on-error: true
+        run: python -m pip install -r requirements-optional.txt
+      - name: Local AI engine (llama-cpp-python 0.3.21 CPU wheel; the build continues without it if none exists)
+        run: python tools/install_ai.py
+      - name: Build the two programs (PyInstaller + self-test)
+        run: python tools/ci_build.py --version $env:VERSION
+      - name: Microsoft Visual C++ runtime (goes inside the installer)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force installer\redist | Out-Null
+          Invoke-WebRequest -Uri 'https://aka.ms/vs/17/release/vc_redist.x64.exe' -OutFile installer\redist\vc_redist.x64.exe -UseBasicParsing
+          if ((Get-Item installer\redist\vc_redist.x64.exe).Length -lt 10000000) { throw 'vc_redist.x64.exe download looks incomplete' }
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup --no-progress -y }
+          if (-not (Test-Path $iscc)) { throw 'Inno Setup 6 not found' }
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" installer\SPS_Browser_Setup.iss
+          if ($LASTEXITCODE -ne 0) { throw 'Inno Setup failed' }
+          Get-ChildItem installer\Output
+      - name: Portable zip
+        shell: pwsh
+        run: Compress-Archive -Path dist\SPS_Browser -DestinationPath "installer\Output\SPS_Browser_Windows_x64_Portable_v$env:VERSION.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: installer/Output/*
+          if-no-files-found: error
+
+  # ───────────────────────────── 3b. LINUX (best effort) ─────────────────────────────
+  linux:
+    needs: [meta, test]
+    runs-on: ubuntu-22.04           # older system = the program also runs on older Linux versions
+    continue-on-error: true
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-*.txt
+      - name: Linux libraries for Qt / WebEngine
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0 libdbus-1-3 \
+            libnss3 libxcomposite1 libxdamage1 libxrandr2 libxtst6 libxkbfile1 libasound2 libxcb-icccm4 libxcb-image0 \
+            libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxcb-shape0
+      - run: python -m pip install -r requirements-build.txt
+      - name: Local AI engine (optional)
+        run: python tools/install_ai.py
+      - name: Build (PyInstaller + self-test)
+        run: python tools/ci_build.py --version "$VERSION"
+      - name: Pack
+        run: |
+          mkdir -p out
+          tar -C dist -czf "out/SPS_Browser_Linux_x64_v${VERSION}.tar.gz" SPS_Browser
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64
+          path: out/*
+          if-no-files-found: error
+
+  # ───────────────────────────── 3c. macOS (best effort, Apple-silicon) ─────────────────────────────
+  macos:
+    needs: [meta, test]
+    runs-on: macos-latest
+    continue-on-error: true
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-*.txt
+      - run: python -m pip install -r requirements-build.txt
+      - name: Local AI engine (optional)
+        run: python tools/install_ai.py
+      - name: App icon (.icns made from the logo)
+        run: |
+          set -e
+          I=assets/icon.iconset; mkdir -p "$I"; S=assets/sps_browser_256.png
+          for n in 16 32 64 128 256; do sips -z $n $n "$S" --out "$I/tmp_$n.png" >/dev/null; done
+          cp "$I/tmp_16.png"  "$I/icon_16x16.png";      cp "$I/tmp_32.png"  "$I/icon_16x16@2x.png"
+          cp "$I/tmp_32.png"  "$I/icon_32x32.png";      cp "$I/tmp_64.png"  "$I/icon_32x32@2x.png"
+          cp "$I/tmp_128.png" "$I/icon_128x128.png";    cp "$I/tmp_256.png" "$I/icon_128x128@2x.png"
+          cp "$I/tmp_256.png" "$I/icon_256x256.png";    rm "$I"/tmp_*.png
+          iconutil -c icns "$I" -o assets/sps_browser.icns
+      - name: Build (PyInstaller + self-test)
+        env:
+          SPS_SELFTEST_SOFT: "1"      # macOS is best-effort: a failed self-test becomes a warning, the package is still made
+        run: python tools/ci_build.py --version "$VERSION"
+      - name: Pack
+        run: |
+          mkdir -p out
+          ditto -c -k --sequesterRsrc --keepParent "dist/SPS Browser.app" "out/SPS_Browser_macOS_arm64_v${VERSION}.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64
+          path: out/*
+          if-no-files-found: error
+
+  # ───────────────── 3d. EXTRA CPU types (best effort - never blocks the release) ─────────────────
+  # Windows 32-bit is NOT possible: Qt6 WebEngine (the browser engine) does not exist for 32-bit Windows.
+  extras:
+    needs: [meta, test]
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04-arm, kind: linux, label: Linux_arm64 }
+          - { os: macos-15-intel,   kind: macos, label: macOS_intel }
+          - { os: windows-11-arm,   kind: windows, label: Windows_arm64 }   # Surface Pro X / Snapdragon PCs (portable zip)
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      SPS_SELFTEST_SOFT: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Linux libraries for Qt / WebEngine
+        if: matrix.kind == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0 libdbus-1-3 \
+            libnss3 libxcomposite1 libxdamage1 libxrandr2 libxtst6 libxkbfile1 libasound2t64 libxcb-icccm4 libxcb-image0 \
+            libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxcb-shape0
+      - run: python -m pip install -r requirements-build.txt
+      - name: Local AI engine (optional)
+        run: python tools/install_ai.py
+      - name: Build (PyInstaller + self-test)
+        run: python tools/ci_build.py --version "$VERSION"
+      - name: Pack
+        run: |
+          mkdir -p out
+          if [[ "${{ matrix.kind }}" == "linux" ]]; then
+            tar -C dist -czf "out/SPS_Browser_${{ matrix.label }}_v${VERSION}.tar.gz" SPS_Browser
+          elif [[ "${{ matrix.kind }}" == "windows" ]]; then
+            powershell -NoProfile -Command "Compress-Archive -Path dist\\SPS_Browser -DestinationPath out\\SPS_Browser_${{ matrix.label }}_Portable_v${VERSION}.zip"
+          else
+            ditto -c -k --sequesterRsrc --keepParent "dist/SPS Browser.app" "out/SPS_Browser_${{ matrix.label }}_v${VERSION}.zip"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: extra-${{ matrix.label }}
+          path: out/*
+          if-no-files-found: error
+
+  attach-extras:
+    if: always() && startsWith(github.ref, 'refs/tags/v') && needs.release.result == 'success'
+    needs: [meta, release, extras]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: extra-*
+          path: extra-files
+          merge-multiple: true
+        continue-on-error: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: extra-files/*
+          fail_on_unmatched_files: false
+
+  # ───────────────────────────── 4. RELEASE (only for tags like v36.1.0) ─────────────────────────────
+  release:
+    if: startsWith(github.ref, 'refs/tags/v') && needs.windows.result == 'success'
+    needs: [meta, windows, linux, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write          # create the release
+      id-token: write          # build provenance (proof that GitHub built these files)
+      attestations: write
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-files
+          merge-multiple: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: SHA-256 list
+        run: |
+          cd release-files
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - name: Signed update block for the in-browser updater
+        env:
+          UPDATE_KEY: ${{ secrets.SPS_UPDATE_PRIVATE_KEY }}
+          REPO: ${{ github.repository }}
+        run: |
+          : > release_notes.md
+          {
+            echo "## SPS Browser $VERSION"
+            echo
+            echo "Downloads: Windows installer (recommended), Windows portable zip, Linux .tar.gz, macOS .zip."
+            echo "Check a download with:  \`sha256sum -c SHA256SUMS.txt\`  (Windows: \`certutil -hashfile <file> SHA256\`)."
+            echo
+          } >> release_notes.md
+          if [[ -z "$UPDATE_KEY" ]]; then
+            echo "::notice::Secret SPS_UPDATE_PRIVATE_KEY is not set - no update block was made (see GITHUB_SETUP.md)."
+          else
+            umask 077; printf '%s\n' "$UPDATE_KEY" > "$RUNNER_TEMP/update_key.txt"
+            F="release-files/SPS_Browser_Setup_v${VERSION}.exe"
+            python tools/publish_update.py "$F" "$VERSION" "https://github.com/${REPO}/releases/download/v${VERSION}/SPS_Browser_Setup_v${VERSION}.exe" \
+              --key "$RUNNER_TEMP/update_key.txt" --notes "SPS Browser $VERSION" > update_block.txt
+            rm -f "$RUNNER_TEMP/update_key.txt"
+            { echo "### Update block (paste into the Google Sites updates page as plain text)"; echo '```'; cat update_block.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            echo "::notice::Signed update block is in the job summary of this run."
+          fi
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: release-files/*
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: SPS Browser ${{ env.VERSION }}
+          body_path: release_notes.md
+          files: release-files/*
+          fail_on_unmatched_files: true
