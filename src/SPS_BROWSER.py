@@ -126,7 +126,7 @@ from PyQt6.QtPrintSupport import QPrinter, QPrintDialog
 #  CONSTANTS & PATHS
 # ═══════════════════════════════════════════════════════════════
 APP_NAME         = "SPS Browser"
-VERSION          = "36.0.0"
+VERSION          = "38.0.0"
 EXTENSION_STORE_URL ="https://spscompany-rikdev.github.io/SPS_BROWSER_EXTENTIONS"
 def _sps_pick_data_root():
     """Find a writable data folder on ANY computer.
@@ -14776,6 +14776,16 @@ class MainWindow(V32Mixin, QMainWindow):
         self._profile_btn.clicked.connect(lambda: self._show_profile_switcher_menu() if hasattr(self, "_show_profile_switcher_menu") else None)
         self.toolbar.addWidget(self._profile_btn)
 
+        self.vpn_btn=QPushButton("🛡 VPN"); self.vpn_btn.setFixedSize(76,34)
+        self.vpn_btn.setToolTip("SPS VPN - connect, change server, settings")
+        self.vpn_btn.setStyleSheet(
+            f"QPushButton{{background:{t['bg_secondary']};color:{t['text_primary']};border:1px solid {t['border']};"
+            f"border-radius:17px;font-size:12px;font-weight:600;min-width:76px;max-width:76px;padding:0 6px;}}"
+            f"QPushButton:hover{{background:{t['hover']};}}")
+        self.vpn_btn.clicked.connect(lambda *_: self._safe_call(self._v39_open_vpn) if hasattr(self,"_v39_open_vpn") else None)
+        self.toolbar.addWidget(self.vpn_btn)
+        self._vpn_timer=QTimer(self); self._vpn_timer.timeout.connect(lambda: self._v39_vpn_badge() if hasattr(self,"_v39_vpn_badge") else None); self._vpn_timer.start(2000)
+
         self.menu_btn=QPushButton("⋮"); self.menu_btn.setFixedSize(36,36)
         self.menu_btn.setStyleSheet(
             f"QPushButton{{font-size:20px;color:{t['text_primary']};border-radius:8px;background:transparent;padding:0;}}"
@@ -17369,6 +17379,7 @@ class MainWindow(V32Mixin, QMainWindow):
         m.addAction("🔍 Site Information",      self.show_site_info)
         m.addAction("💻 Developer Tools (F12)", self.open_dev_tools)
         m.addAction("📄 View Source (Ctrl+U)",  self.view_source)
+        m.addAction("🛡 SPS VPN…", lambda: self._safe_call(self._v39_open_vpn) if hasattr(self,"_v39_open_vpn") else None)
         m.addAction("🖨️ Print (Ctrl+P)",       self.print_page)
         m.addAction("💾 Save Page (Ctrl+S)",   self.save_page)
         m.addSeparator()
@@ -17456,6 +17467,7 @@ class MainWindow(V32Mixin, QMainWindow):
         help_menu.addAction("🆘 Support",                 lambda: self._safe_call(self._show_support_page) if hasattr(self,"_show_support_page") else None)
         help_menu.addAction("🗑️ Clear Browsing Data…  (Ctrl+Shift+Del)", lambda: self._safe_call(self._show_clear_browsing_data) if hasattr(self,"_show_clear_browsing_data") else None)
         help_menu.addAction("🔄 Check for Updates",       lambda: self._safe_call(self._check_for_updates) if hasattr(self,"_check_for_updates") else None)
+        help_menu.addAction("🌐 Open page in Chrome/Edge (needed for Google sign-in)", lambda: self._safe_call(self._v36_open_in_system_browser) if hasattr(self,"_v36_open_in_system_browser") else None)
         help_menu.addAction("🖥 Graphics mode (safe / normal)", lambda: self._safe_call(self._v36_toggle_graphics) if hasattr(self,"_v36_toggle_graphics") else None)
         help_menu.addAction("🌐 Set as Default Browser",  lambda: self._safe_call(self._set_as_default_browser) if hasattr(self,"_set_as_default_browser") else None)
         help_menu.addAction("🐛 Crash Reports",           lambda: self._safe_call(self._show_crash_report_dialog) if hasattr(self,"_show_crash_report_dialog") else None)
@@ -19260,6 +19272,13 @@ def sps_main():
         _sps_focus_pid(_run)                                    # that profile is already open: show it, do not open it twice
         sys.exit(0)
 
+    try:
+        import sps_vpn_ui
+        _vf = sps_vpn_ui.startup_flags(APP_ROOT_DIR)           # SPS VPN: route the whole browser through the local gateway (only when switched on)
+        if _vf:
+            os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "") + " " + _vf).strip()
+    except Exception:
+        pass
     try:
         _extra_flags = _sps_chromium_flags_from_settings(load_settings(profile))
         if _extra_flags:

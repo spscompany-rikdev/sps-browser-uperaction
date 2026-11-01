@@ -1,0 +1,4 @@
+:root{color-scheme:light dark}body{box-sizing:border-box;width:300px;overflow-x:hidden;margin:0;padding:14px;font:14px system-ui}h1{font-size:17px;margin:0 0 6px}
+.site{opacity:.7;margin-bottom:8px;word-break:break-all}.row{display:flex;gap:8px;align-items:center;margin:6px 0}
+button{display:block;width:100%;margin:6px 0;padding:8px;border-radius:8px;border:1px solid #8884;background:transparent;color:inherit;font:inherit;cursor:pointer}
+button:hover{background:#8882}hr{border:0;border-top:1px solid #8883;margin:10px 0}.stat{opacity:.7;font-size:12px}a{font-size:12px}

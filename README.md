@@ -20,3 +20,15 @@
 `requirements-optional.txt` (text-to-speech). A test checks that nothing the code imports is missing from these lists.
 
 **Never publish:** `update_private_key.txt` (your update-signing key) or any `.pfx` certificate.
+
+## SPS VPN - what it is (and is not)
+SPS VPN is a **VPN client**, not a VPN service like Proton VPN. It has **no servers of its own**.
+- **Browser mode** (Connect / Auto): only SPS Browser's traffic goes through your WireGuard / SOCKS5 / HTTP server or Tor. Kill switch included.
+- **Whole-computer mode** ("Protect WHOLE computer"): uses the free official WireGuard program (Windows: WireGuard for Windows; Linux/macOS: wg-quick) with administrator approval, so every app is protected. Needs a WireGuard config. Not yet tested on real Windows/macOS.
+- Where to get a server: see `VPN_GUIDE.md`.
+
+## SPS Shield (Chrome/Edge extension)
+See `EXTENSION_PUBLISH_GUIDE.md`. Build: `python tools/build_extension.py`.
+
+## Install everything to build
+`python -m pip install -r requirements.txt` then `python tools/ci_build.py`.

@@ -151,6 +151,8 @@ def _selftest():
     check("import sps_filter_engine (ad blocker)", lambda: __import__("sps_filter_engine"))
     check("updater: Ed25519 signature check", lambda: (__import__("sps_ed25519").self_test() or (_ for _ in ()).throw(RuntimeError("self-test failed"))))
     check("import sps_updater", lambda: __import__("sps_updater"))
+    check("import sps_print (print window)", lambda: __import__("sps_print"))
+    check("import sps_vpn_ui (SPS VPN window)", lambda: __import__("sps_vpn_ui"))
     check("import sps_pages (error pages)", lambda: __import__("sps_pages"))
     check("import browser module", lambda: __import__("sps_browser_app"), hard=False)
     if not ok:                                     # help diagnose a missing file from the log alone

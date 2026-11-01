@@ -1,6 +1,6 @@
 """One build script for Windows, macOS and Linux (used by GitHub Actions, also works on your own PC):
 
-    python tools/ci_build.py [--version 36.1.0]
+    python tools/ci_build.py [--version 38.0.0]
 
  1. (optional) writes the version into src/SPS_BROWSER.py and installer/SPS_Browser_Setup.iss
  2. runs PyInstaller with SPS_Browser.spec  -> dist/SPS_Browser   (macOS: dist/SPS Browser.app)
@@ -20,7 +20,7 @@ def step(msg):
 
 def set_version(v):
     if not re.fullmatch(r"\d{1,4}\.\d{1,4}\.\d{1,4}", v):
-        sys.exit("version must look like 36.1.0")
+        sys.exit("version must look like 38.0.0")
     for path, rx, rep in (("src/SPS_BROWSER.py", r'^(VERSION\s*=\s*")[^"]*(")', r"\g<1>%s\g<2>" % v),
                           ("installer/SPS_Browser_Setup.iss", r'^(#define APP_VERSION\s+")[^"]*(")', r"\g<1>%s\g<2>" % v)):
         text = open(path, encoding="utf-8").read()
@@ -68,6 +68,12 @@ def main():
     for f in glob.glob(os.path.join(ROOT, "assets", "sps_browser.*")):
         if f.endswith((".ico", ".png", ".icns")):
             shutil.copy2(f, os.path.join(folder, "assets"))
+
+    step("SPS VPN helper programs (free wireproxy + Tor; optional)")
+    try:
+        subprocess.call([sys.executable, os.path.join(ROOT, "tools", "fetch_vpn_components.py"), folder], timeout=900)
+    except Exception as e:                                       # never fail the build because of an optional download
+        print("::warning::VPN helper download skipped:", e)
 
     step("Self-test of the built program")
     env = dict(os.environ, QT_QPA_PLATFORM="offscreen", QTWEBENGINE_CHROMIUM_FLAGS="--no-sandbox")

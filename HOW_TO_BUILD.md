@@ -27,7 +27,7 @@ pyinstaller SPS_Browser.spec
 ## V33 file layout
 | File | What it is |
 |---|---|
-| `src/SPS_BROWSER.py` | Main browser (~18 500 lines). VERSION = 36.0.0 |
+| `src/SPS_BROWSER.py` | Main browser (~18 500 lines). VERSION = 38.0.0 |
 | `src/_v33_patch.py`, `src/_v34_patch.py` | V33/V34 feature patches — packed into the exe as data files and loaded at startup (the spec fails the build if they are missing) |
 | `src/sps_filter_engine.py` | Ad-blocker / filter engine |
 | `src/sps_pages.py` | HTML for error / cert / threat pages |
@@ -104,7 +104,7 @@ See `UPDATE_PAGE_FORMAT.md`. Before the first public build run `python tools/mak
 
 ## Build on GitHub instead of your PC
 See `GITHUB_SETUP.md` (`.github/workflows/build.yml`, `tools/ci_build.py`). The same script works locally:
-`python tools/ci_build.py --version 36.1.0` (Windows, macOS or Linux).
+`python tools/ci_build.py --version 38.0.0` (Windows, macOS or Linux).
 
 ## Libraries (complete list)
 `requirements-build.txt` - PyQt6 6.11.0 (+ WebEngine), psutil, watchdog, requests, certifi, PyInstaller (all pinned).

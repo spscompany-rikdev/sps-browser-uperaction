@@ -15,8 +15,8 @@
 
 ```
 SPS-UPDATE-BEGIN
-version: 36.1.0
-url: https://github.com/you/repo/releases/download/v36.1.0/SPS_Browser_Setup_36.1.0.exe
+version: 38.0.0
+url: https://github.com/you/repo/releases/download/v38.0.0/SPS_Browser_Setup_38.0.0.exe
 sha256: <64 hex>
 size: <bytes>
 mandatory: yes

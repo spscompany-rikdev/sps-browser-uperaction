@@ -35,7 +35,7 @@ SPS_UPDATE_PAGE = "https://sites.google.com/view/spsbrowserpro/updates"
 
 # Public half of the owner's update-signing key (64 hex characters).  The matching private key is NEVER shipped.
 # tools/make_update_keys.py writes a fresh pair and puts the public half here.
-UPDATE_PUBLIC_KEY_HEX = "3ccd8bb3a32d1718c9023bb213dfa4a724d205cab27ed23bc21084e7e56d7a9f"
+UPDATE_PUBLIC_KEY_HEX = "f661acc80d3f133b3c49f8ec12f15537af4c1842212b9ebf2f9e049ad442c2fa"
 
 CHECK_INTERVAL_SECONDS = 6 * 3600       # how often a running browser looks for news
 FIRST_CHECK_DELAY_SECONDS = 25          # wait a little after start-up so the browser stays fast

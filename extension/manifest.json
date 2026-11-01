@@ -1,0 +1,61 @@
+{
+  "manifest_version": 3,
+  "name": "SPS Shield",
+  "version": "38.0.0",
+  "description": "Free privacy shield for Chrome/Chromium: blocks trackers, strips tracking links, memory saver, area print, reader and dark mode. No data leaves your computer.",
+  "minimum_chrome_version": "110",
+  "icons": {
+    "16": "icons/16.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  },
+  "action": {
+    "default_title": "SPS Shield",
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/16.png",
+      "48": "icons/48.png"
+    }
+  },
+  "options_page": "options/options.html",
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": [
+    "declarativeNetRequest",
+    "storage",
+    "scripting",
+    "activeTab",
+    "alarms",
+    "privacy",
+    "tabs"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "trackers",
+        "enabled": true,
+        "path": "rules/trackers.json"
+      },
+      {
+        "id": "params",
+        "enabled": true,
+        "path": "rules/params.json"
+      }
+    ]
+  },
+  "commands": {
+    "area-print": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+P"
+      },
+      "description": "Print a selected area of the page"
+    }
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  }
+}

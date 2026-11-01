@@ -467,3 +467,73 @@ def _v36_toggle_graphics(self):
         QMessageBox.warning(self, "Graphics mode", f"Could not change the graphics mode: {e}")
 
 MainWindow._v36_toggle_graphics = _v36_toggle_graphics
+
+
+# ── V38: open the current page in the computer's normal browser (e.g. for "Sign in with Google") ──
+def _v36_open_in_system_browser(self):
+    """Google refuses account sign-in inside embedded browsers (this includes every Qt/Electron/CEF app). Sign in with
+    Chrome, Edge or Firefox instead; this opens the current page there."""
+    try:
+        w = self.tabs.currentWidget()
+        url = w.url() if w is not None else None
+        if url is None or not url.toString() or url.scheme() not in ("http", "https"):
+            QMessageBox.information(self, "Open in the system browser", "Open a web page first.")
+            return
+        from PyQt6.QtGui import QDesktopServices
+        QDesktopServices.openUrl(url)
+    except Exception as e:
+        QMessageBox.warning(self, "Open in the system browser", f"Could not open it: {e}")
+
+MainWindow._v36_open_in_system_browser = _v36_open_in_system_browser
+
+
+# ── V38: Chrome-style print window (preview, paper, margins, scale, headers, "selected area" ...) ──
+def _v38_print_page(self):
+    try:
+        import sps_print
+        os.environ.setdefault("SPS_DATA_DIR", APP_ROOT_DIR)
+        sps_print.show_print_dialog(self, to_pdf=False)
+    except Exception as e:
+        QMessageBox.warning(self, "Print", f"The print window could not open: {e}")
+
+def _v38_export_pdf(self):
+    try:
+        import sps_print
+        os.environ.setdefault("SPS_DATA_DIR", APP_ROOT_DIR)
+        sps_print.show_print_dialog(self, to_pdf=True)
+    except Exception as e:
+        QMessageBox.warning(self, "Export PDF", f"The export window could not open: {e}")
+
+MainWindow.print_page = _v38_print_page
+MainWindow.export_pdf = _v38_export_pdf
+
+
+# ── V39: SPS VPN window + toolbar badge ──
+def _v39_vpn_restart(self):
+    try:
+        _sps_spawn_delayed(_sps_build_restart_cmd(str(self.profile_name), "vpn"), os.getpid())
+    except Exception:
+        pass
+    QApplication.quit()
+
+def _v39_open_vpn(self):
+    try:
+        import sps_vpn_ui
+        sps_vpn_ui.show_vpn_dialog(self, base=APP_ROOT_DIR, restart_cb=lambda: _v39_vpn_restart(self))
+        self._v39_vpn_badge()
+    except Exception as e:
+        QMessageBox.warning(self, "SPS VPN", f"The VPN window could not open: {e}")
+
+def _v39_vpn_badge(self):
+    try:
+        import sps_vpn_ui
+        m = sps_vpn_ui._MANAGER
+        st = m.state if m else "off"
+        self.vpn_btn.setText({"connected": "🟢 VPN", "connecting": "🟡 VPN", "error": "🔴 VPN"}.get(st, "🛡 VPN"))
+        self.vpn_btn.setToolTip("SPS VPN: " + (m.message if m else "not connected"))
+    except Exception:
+        pass
+
+MainWindow._v39_vpn_restart = _v39_vpn_restart
+MainWindow._v39_open_vpn = _v39_open_vpn
+MainWindow._v39_vpn_badge = _v39_vpn_badge

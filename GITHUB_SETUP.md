@@ -28,10 +28,10 @@ You do NOT need to build anything on your own PC. GitHub does it for free (publi
   the files at the bottom, under **Artifacts** (`windows`, `linux`, `macos`).
 * **Real release:** change the version, then tag it:
   ```
-  git tag v36.1.0
-  git push origin v36.1.0
+  git tag v38.0.0
+  git push origin v38.0.0
   ```
-  (or GitHub -> Releases -> *Draft a new release* -> create tag `v36.1.0`). The workflow then
+  (or GitHub -> Releases -> *Draft a new release* -> create tag `v38.0.0`). The workflow then
   1. runs all tests, 2. writes the version into the code and the installer, 3. builds on Windows, Linux and macOS,
   4. runs the program's self-test, 5. makes the Windows installer (Inno Setup, same AppId), 6. publishes a **Release**
   with all downloads + `SHA256SUMS.txt` + build provenance, 7. prints the **signed update block** in the run's *Summary* page.
@@ -53,3 +53,20 @@ You do NOT need to build anything on your own PC. GitHub does it for free (publi
 * Anyone with write access to the repository can run the workflow. Keep the repository under your own account and protect it
   with two-factor login. The GitHub secret is encrypted and never printed in logs.
 * Library versions are pinned in `requirements-build.txt`; Dependabot proposes updates monthly.
+
+
+## Android (.apk)
+The workflow also builds `SPS_Browser_Android_vX.Y.Z.apk` (folder `android/`). It is a separate, small phone browser (the desktop
+version cannot run on Android) based on the system WebView: address/search bar, back/forward/reload, downloads, full-screen video,
+https-only. It appears in the run as the artifact **extra-Android** and is added to the release a few minutes after it.
+
+* Install on a phone: copy the .apk to the phone, open it, allow "Install unknown apps" for your file manager once.
+* **Permanent signing key (recommended before you share it):** without it every build gets a different temporary key, so a new
+  version cannot be installed over the old one (the phone says the app conflicts). Create a key ONCE on your PC (needs Java):
+  `keytool -genkeypair -v -keystore sps-release.jks -alias sps -keyalg RSA -keysize 2048 -validity 10000`
+  then make its text form: PowerShell `[Convert]::ToBase64String([IO.File]::ReadAllBytes("sps-release.jks"))`
+  and add these GitHub Secrets: `ANDROID_KEYSTORE_BASE64` (that text), `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS` (sps),
+  and optionally `ANDROID_KEY_PASSWORD`. Keep the .jks file safe; losing it means users must uninstall to update.
+* This APK is for direct install, not for the Play Store (that needs a Play developer account and an .aab bundle).
+
+See `UPDATE_TEST_GUIDE.md` for where the update key goes and how to test updates.

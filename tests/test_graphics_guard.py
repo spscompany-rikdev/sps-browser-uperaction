@@ -59,3 +59,61 @@ class HttpErrorsAreShownAsSent(unittest.TestCase):
         for dom, code in (("HttpStatusCodeDomain", 429), ("HttpErrorDomain", 404), ("HttpStatusCodeDomain", 503)):
             self.assertIsNone(sps_pages.error_category(code, dom))
         self.assertEqual(sps_pages.error_category(-105, "DnsErrorDomain"), "dns")
+
+
+class AndroidAndKeyFiles(unittest.TestCase):
+    ROOT = os.path.join(os.path.dirname(__file__), "..")
+
+    def test_android_project_is_complete(self):
+        for f in ("android/settings.gradle", "android/build.gradle", "android/app/build.gradle",
+                  "android/app/src/main/AndroidManifest.xml",
+                  "android/app/src/main/java/com/spscompany/spsbrowser/MainActivity.java",
+                  "android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png"):
+            self.assertTrue(os.path.isfile(os.path.join(self.ROOT, f)), f)
+        import xml.dom.minidom as m
+        m.parse(os.path.join(self.ROOT, "android/app/src/main/AndroidManifest.xml"))
+        self.assertIn('usesCleartextTraffic="false"', open(os.path.join(self.ROOT, "android/app/src/main/AndroidManifest.xml")).read())
+
+    def test_support_form_is_set(self):
+        t = open(os.path.join(self.ROOT, "extras", "support_form.txt"), encoding="utf-8").read()
+        self.assertIn("docs.google.com/forms/", t)
+        self.assertNotIn("PASTE_YOUR", t)
+
+    def test_no_private_key_in_project(self):
+        for dp, dn, fn in os.walk(self.ROOT):
+            for f in fn:
+                self.assertNotIn("private_key", f.lower(), os.path.join(dp, f))
+
+
+class PrintAndApkFeatures(unittest.TestCase):
+    ROOT = os.path.join(os.path.dirname(__file__), "..")
+
+    def test_print_helpers(self):
+        import sys
+        sys.path.insert(0, os.path.join(self.ROOT, "src"))
+        os.environ["QT_QPA_PLATFORM"] = "offscreen"
+        import sps_print
+        self.assertEqual(sps_print.parse_ranges("1-3, 5, 8-")[:2], [(1, 3), (5, 5)])
+        self.assertIsNone(sps_print.parse_ranges("abc"))
+        self.assertIsNone(sps_print.parse_ranges("5-2"))
+        css = sps_print.print_css(80, True, 'T"itle', "https://x.test/")
+        self.assertIn("zoom: 0.8", css)
+        self.assertIn('"T\\"itle"', css)
+        self.assertNotIn("@page", sps_print.print_css(100, False, "t", "u"))
+
+    def test_window_uses_new_print_dialog(self):
+        s = open(os.path.join(self.ROOT, "src", "_v36_patch.py"), encoding="utf-8").read()
+        self.assertIn("MainWindow.print_page = _v38_print_page", s)
+        self.assertIn("MainWindow.export_pdf = _v38_export_pdf", s)
+        spec = open(os.path.join(self.ROOT, "SPS_Browser.spec"), encoding="utf-8").read()
+        self.assertIn('"sps_print"', spec)
+
+    def test_apk_permissions_and_features(self):
+        m = open(os.path.join(self.ROOT, "android/app/src/main/AndroidManifest.xml"), encoding="utf-8").read()
+        for perm in ("CAMERA", "RECORD_AUDIO", "ACCESS_FINE_LOCATION"):
+            self.assertIn("android.permission." + perm, m)
+        self.assertIn("networkSecurityConfig", m)
+        j = open(os.path.join(self.ROOT, "android/app/src/main/java/com/spscompany/spsbrowser/MainActivity.java"), encoding="utf-8").read()
+        for needle in ("onPermissionRequest", "onGeolocationPermissionsShowPrompt", "RecognizerIntent", "showDownloads",
+                       "showSettings", "printSelectedArea", "FLAG_SECURE"):
+            self.assertIn(needle, j)

@@ -1,0 +1,51 @@
+plugins {
+    id 'com.android.application'
+}
+
+// version comes from the build (VERSION env, e.g. 38.0.0); 38.0.0 -> versionCode 380000
+def appVersion = System.getenv("VERSION") ?: "38.0.0"
+def parts = appVersion.tokenize('.')
+def code = 1
+try { code = parts[0].toInteger() * 10000 + (parts.size() > 1 ? parts[1].toInteger() : 0) * 100 + (parts.size() > 2 ? parts[2].toInteger() : 0) } catch (Exception ignored) { }
+
+android {
+    namespace 'com.spscompany.spsbrowser'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.spscompany.spsbrowser"
+        minSdk 24
+        targetSdk 34
+        versionCode code
+        versionName appVersion
+    }
+
+    signingConfigs {
+        // A permanent key (GitHub Secrets) is used when it is provided - phones then accept updates over the old app.
+        // Without it the APK is signed with a temporary key (fine for testing, but every build has a different signature).
+        release {
+            def ks = System.getenv("ANDROID_KEYSTORE_PATH")
+            if (ks && new File(ks).exists()) {
+                storeFile file(ks)
+                storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
+                keyAlias System.getenv("ANDROID_KEY_ALIAS")
+                keyPassword System.getenv("ANDROID_KEY_PASSWORD")
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig = System.getenv("ANDROID_KEYSTORE_PATH") ? signingConfigs.release : signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    lint {
+        abortOnError false
+    }
+}
