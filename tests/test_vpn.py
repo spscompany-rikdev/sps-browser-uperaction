@@ -219,3 +219,10 @@ class SystemVpnTests(unittest.TestCase):
         self.assertIn("up" if not S.IS_WIN else "/installtunnelservice", S.commands("up", p))
         with self.assertRaises(ValueError):
             S.write_conf(d, "nonsense")
+
+
+class AndroidWorkflowTests(unittest.TestCase):
+    def test_no_broken_setup_android_action(self):
+        wf = open(os.path.join(os.path.dirname(__file__), "..", ".github", "workflows", "build.yml"), encoding="utf-8").read()
+        self.assertNotIn("android-actions/setup-android", wf)      # its sdkmanager 'tools' step fails on current runners
+        self.assertIn("platforms;android-34", wf)

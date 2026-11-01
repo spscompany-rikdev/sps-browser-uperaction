@@ -189,6 +189,7 @@ public class MainActivity extends Activity {
         urlBar.setBackgroundColor(Color.WHITE);
         tabsButton = barButton("1");
         Button menu = barButton("⋮");
+        Button mic = barButton("🎤");
 
         bar.addView(back);
         bar.addView(reload);
@@ -885,7 +886,7 @@ public class MainActivity extends Activity {
                         if (c.moveToFirst()) {
                             int st = c.getInt(c.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS));
                             long total = c.getLong(c.getColumnIndexOrThrow(DownloadManager.COLUMN_TOTAL_SIZE_BYTES));
-                            long got = c.getLong(c.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_SO_FAR));
+                            long got = c.getLong(c.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR));
                             if (st == DownloadManager.STATUS_SUCCESSFUL) { status = "done"; ok = true; }
                             else if (st == DownloadManager.STATUS_FAILED) status = "failed";
                             else if (st == DownloadManager.STATUS_PAUSED) status = "paused";
