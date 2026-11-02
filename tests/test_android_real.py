@@ -10,6 +10,55 @@ def _main():
     return open(os.path.join(JAVA, "MainActivity.java"), encoding="utf-8").read()
 
 
+class CardsAndQuotesTests(unittest.TestCase):
+    def test_quotes_and_cards(self):
+        m = _main()
+        for k in ("Quotes.at(Quotes.today())", "showQuote(", "maybeShowDailyQuote()", "dailyquote", "class='c'", "linear-gradient"):
+            self.assertIn(k, m)
+        q = open(os.path.join(JAVA, "Quotes.java"), encoding="utf-8").read()
+        self.assertGreaterEqual(q.count('{"'), 10)
+
+
+class DesktopManagerWiringTests(unittest.TestCase):
+    def test_patch_wiring(self):
+        p = open(os.path.join(ROOT, "src", "_v36_patch.py"), encoding="utf-8").read()
+        for k in ("MainWindow._load_history", "MainWindow._load_passwords", "MainWindow._save_passwords", "MainWindow.show_history",
+                  "MainWindow.show_cookie_manager", "MainWindow.show_tab_organizer", "CookieTracker"):
+            self.assertIn(k, p)
+        self.assertIn("sps_manager", open(os.path.join(ROOT, "SPS_Browser.spec"), encoding="utf-8").read())
+
+    def test_every_self_call_in_patches_exists(self):
+        """The crash '_load_history missing' came from patch code calling a method MainWindow does not have."""
+        import ast
+        src = open(os.path.join(ROOT, "src", "SPS_BROWSER.py"), encoding="utf-8").read()
+        tree = ast.parse(src)
+        def attrs(c):
+            a = set()
+            for n in ast.walk(c):
+                if isinstance(n, ast.FunctionDef): a.add(n.name)
+                if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == "self" and isinstance(n.ctx, ast.Store): a.add(n.attr)
+            return a
+        cls = {n.name: n for n in tree.body if isinstance(n, ast.ClassDef)}
+        have = attrs(cls["MainWindow"]) | attrs(cls["V32Mixin"])
+        for f in ("_v33_patch.py", "_v34_patch.py", "_v36_patch.py"):
+            t = open(os.path.join(ROOT, "src", f), encoding="utf-8").read()
+            for m in re.finditer(r"MainWindow\.(\w+)\s*=", t): have.add(m.group(1))
+            for m in re.finditer(r"^def (\w+)\(self", t, re.M): have.add(m.group(1))
+            for m in re.finditer(r'^\s+"(\w+)":\s+\w+,', t, re.M): have.add(m.group(1))
+        have |= {"_load_history"}  # supplied by _v36_patch
+        for f in ("_v33_patch.py", "_v34_patch.py"):
+            t = ast.parse(open(os.path.join(ROOT, "src", f), encoding="utf-8").read())
+            for fn in ast.walk(t):
+                if isinstance(fn, ast.FunctionDef) and fn.args.args and fn.args.args[0].arg == "self":
+                    for n in ast.walk(fn):
+                        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name) \
+                                and n.func.value.id == "self" and n.func.attr.startswith("_") and n.func.attr not in have:
+                            if n.func.attr in ("_load_passwords", "_save_passwords"):
+                                have.add(n.func.attr)
+                            else:
+                                self.fail("%s calls self.%s() which MainWindow does not define" % (f, n.func.attr))
+
+
 class UploadWiringTests(unittest.TestCase):
     def test_upload_flow(self):
         m = _main()
