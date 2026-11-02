@@ -1,0 +1,3 @@
+# ───────────── OPTIONAL extras ─────────────
+# Text-to-speech for "Read aloud" (Windows). Without it the browser shows "Install pyttsx3 ..." when you click Read aloud.
+pyttsx3>=2.90; sys_platform == "win32"
