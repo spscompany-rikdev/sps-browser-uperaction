@@ -226,3 +226,43 @@ class AndroidWorkflowTests(unittest.TestCase):
         wf = open(os.path.join(os.path.dirname(__file__), "..", ".github", "workflows", "build.yml"), encoding="utf-8").read()
         self.assertNotIn("android-actions/setup-android", wf)      # its sdkmanager 'tools' step fails on current runners
         self.assertIn("platforms;android-34", wf)
+
+
+class AndroidUiTests(unittest.TestCase):
+    ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "android", "app", "src", "main"))
+
+    def _j(self, name):
+        return open(os.path.join(self.ROOT, "java", "com", "spscompany", "spsbrowser", name), encoding="utf-8").read()
+
+    def test_files_exist(self):
+        for f in ("Ico.java", "UI.java", "Crypto.java", "Store.java", "Profiles.java", "ListPage.java", "TabsPage.java",
+                  "Vault.java", "PasswordGen.java", "Host.java", "BTab.java"):
+            self.assertTrue(os.path.isfile(os.path.join(self.ROOT, "java", "com", "spscompany", "spsbrowser", f)), f)
+        self.assertTrue(os.path.isfile(os.path.join(self.ROOT, "assets", "icons.txt")))
+
+    def test_security_design(self):
+        c = self._j("Crypto.java")
+        self.assertIn("AndroidKeyStore", c); self.assertIn("AES/GCM/NoPadding", c); self.assertIn("updateAAD", c)
+        m = self._j("MainActivity.java")
+        self.assertIn("createConfirmDeviceCredentialIntent", m)       # screen lock before passwords are used
+        self.assertIn("FLAG_SECURE", m)
+        self.assertIn("equals(real)", m)                              # the page cannot speak for another host
+        self.assertIn('"secure"', m)
+        self.assertNotIn("setJavaScriptEnabled(true);\n        s.setAllowFileAccess(true", m)
+
+    def test_icons_parse(self):
+        import re
+        for line in open(os.path.join(self.ROOT, "assets", "icons.txt"), encoding="utf-8"):
+            name, ops = line.rstrip("\n").split("|", 1)
+            toks = ops.split()
+            self.assertTrue(toks and toks[0] in ("M", "N", "C", "F", "A", "R"), name)
+            for t in toks:
+                self.assertTrue(t in ("M", "N", "L", "Z", "C", "F", "A", "R") or re.match(r"^-?[\d.]+(,-?[\d.]+)*$", t), (name, t))
+
+    def test_features_present(self):
+        m = self._j("MainActivity.java")
+        for needle in ("showProfiles", "showTabs", "showBookmarks", "showHistory", "showDownloads", "showSettings", "fillAddress", "offerSaveBanner"):
+            self.assertIn(needle, m)
+        t = self._j("TabsPage.java")
+        for needle in ("closeDuplicates", "recentlyClosed", "Pin", "Select tabs", "Sort A to Z"):
+            self.assertIn(needle, t)

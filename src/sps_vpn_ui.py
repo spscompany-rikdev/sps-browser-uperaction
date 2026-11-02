@@ -90,7 +90,7 @@ class SpsVpnDialog(QDialog):
         self.list = QListWidget(); self.list.itemDoubleClicked.connect(lambda *_: self.on_connect()); lay.addWidget(self.list, 1)
 
         r2 = QHBoxLayout()
-        for text, fn in (("+ WireGuard file…", self.add_wg), ("+ SOCKS5", lambda: self.add_proxy("socks5")),
+        for text, fn in (("+ WireGuard file…", self.add_wg), ("+ Paste config", self.paste_wg), ("+ SOCKS5", lambda: self.add_proxy("socks5")),
                          ("+ HTTP proxy", lambda: self.add_proxy("http")), ("+ Tor", self.add_tor)):
             b = QPushButton(text); b.clicked.connect(fn); r2.addWidget(b)
         lay.addLayout(r2)
@@ -104,6 +104,10 @@ class SpsVpnDialog(QDialog):
         self.btn_sys_off = QPushButton("Stop whole-computer VPN"); self.btn_sys_off.clicked.connect(self.sys_off)
         r4.addWidget(self.btn_sys_on); r4.addWidget(self.btn_sys_off)
         lay.addLayout(r4)
+        r5 = QHBoxLayout()
+        b = QPushButton("Install WireGuard (needed once)"); b.clicked.connect(self.install_wg); r5.addWidget(b)
+        b = QPushButton("How do I get a .conf file?"); b.clicked.connect(self.help_conf); r5.addWidget(b)
+        lay.addLayout(r5)
 
         sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine); lay.addWidget(sep)
         self.chk_enabled = QCheckBox("Turn on VPN support (the whole browser then goes through SPS VPN; restart needed)")
@@ -278,6 +282,39 @@ class SpsVpnDialog(QDialog):
                                         "put wireproxy(.exe) there (Open VPN folder) before connecting.")
         except Exception as e:
             QMessageBox.warning(self, "SPS VPN", "That file could not be used: %s" % e)
+
+    def paste_wg(self):
+        from PyQt6.QtWidgets import QInputDialog
+        text, ok = QInputDialog.getMultiLineText(self, "Paste WireGuard config", "Paste the whole config (starts with [Interface]):")
+        if not ok or not text.strip():
+            return
+        try:
+            clean, info = sps_vpn.parse_wireguard(text)
+            name, ok2 = QInputDialog.getText(self, "Name", "Name for this server:", text=info.get("endpoint", "") or "My WireGuard")
+            if not ok2:
+                return
+            self.m.store.add(sps_vpn.make_server("wireguard", name.strip() or "WireGuard", conf=clean, endpoint=info.get("endpoint", "")))
+            self.refresh()
+        except Exception as e:
+            QMessageBox.warning(self, "SPS VPN", "That config could not be used: %s" % e)
+
+    def install_wg(self):
+        try:
+            QMessageBox.information(self, "SPS VPN", sps_vpn_system.install_wireguard(self.m.helper_dirs))
+        except Exception as e:
+            QMessageBox.warning(self, "SPS VPN", str(e))
+
+    def help_conf(self):
+        QMessageBox.information(self, "Where to get a WireGuard .conf file",
+            "SPS Browser has no VPN servers of its own, and it never shares one account with everybody (that would be unsafe and "
+            "the provider would ban it).\n\n"
+            "Easy, free options:\n"
+            "1. Proton VPN (free plan): log in at account.protonvpn.com > Downloads > WireGuard configuration > pick a free server > Create > Download.\n"
+            "2. Your own server: a cheap VPS with the free PiVPN / wg-easy tool gives you a .conf for each device.\n"
+            "3. Any paid VPN (Mullvad, IVPN, Proton...) that offers WireGuard files.\n\n"
+            "Then: press '+ WireGuard file...' (or '+ Paste config'), select it, and press 'Protect WHOLE computer'.\n"
+            "Without a config you can still use Tor (free) for the browser only.")
+        QDesktopServices.openUrl(QUrl("https://account.protonvpn.com/downloads"))
 
     def add_proxy(self, kind):
         dlg = _AddServerDialog(self, kind)

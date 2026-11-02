@@ -13,3 +13,11 @@ Never use random "free proxy list" servers: the operator can read and change you
 - Browser only: SPS Browser -> 🛡 VPN -> `+ WireGuard file…` -> select -> Connect (browser restarts once).
 - Whole computer: install WireGuard (Windows: wireguard.com/install; Linux: `sudo apt install wireguard-tools`), then in the VPN window select the WireGuard server -> "Protect WHOLE computer" and approve the administrator prompt. Undo with "Stop whole-computer VPN".
 - Check at any "what is my IP" site that the address changed.
+
+## Protecting the WHOLE computer (step by step)
+1. Open SPS VPN -> **Install WireGuard (needed once)** (Windows installer is bundled; its WireGuard LLC signature is verified first).
+2. Get a WireGuard `.conf` (SPS has no servers and never shares one account between users):
+   - Proton VPN free plan: account.protonvpn.com -> Downloads -> WireGuard configuration -> choose a free server -> Create -> Download.
+   - Your own server (PiVPN / wg-easy on a cheap VPS), or Mullvad / IVPN / any provider that offers WireGuard files.
+3. **+ WireGuard file...** or **+ Paste config**, select it, press **Protect WHOLE computer**, approve the administrator prompt.
+4. Undo with **Stop whole-computer VPN**.

@@ -77,13 +77,29 @@ def fetch_tor(vpn):
     return "tor " + ver
 
 
+def fetch_wireguard_msi(vpn):
+    """Official WireGuard for Windows installer (signed by WireGuard LLC; SPS verifies the signature again before installing)."""
+    if not sys.platform.startswith("win"):
+        raise RuntimeError("only needed on Windows")
+    listing = _get("https://download.wireguard.com/windows-client/").decode("utf-8", "replace")
+    names = sorted(set(re.findall(r'wireguard-amd64-(\d+(?:\.\d+)*)\.msi', listing)),
+                   key=lambda v: [int(x) for x in v.split(".")])
+    if not names:
+        raise RuntimeError("no WireGuard MSI found in the listing")
+    fn = "wireguard-amd64-%s.msi" % names[-1]
+    os.makedirs(vpn, exist_ok=True)
+    with open(os.path.join(vpn, fn), "wb") as f:
+        f.write(_get("https://download.wireguard.com/windows-client/" + fn, 300))
+    return "wireguard-msi " + names[-1]
+
+
 def main(argv):
     if not argv or argv[0].startswith("--"):
         print(__doc__); return 2
     vpn = os.path.join(argv[0], "vpn")
     only = argv[argv.index("--only") + 1] if "--only" in argv else None
     ok = []
-    for name, fn in (("wireproxy", fetch_wireproxy), ("tor", fetch_tor)):
+    for name, fn in (("wireproxy", fetch_wireproxy), ("tor", fetch_tor), ("wireguard", fetch_wireguard_msi)):
         if only and only != name:
             continue
         try:
@@ -95,7 +111,8 @@ def main(argv):
         with open(notice, "w", encoding="utf-8") as f:
             f.write("Third-party programs used by SPS VPN (unchanged, from their official releases):\n"
                     "- wireproxy (ISC licence) https://github.com/pufferffish/wireproxy\n"
-                    "- Tor (BSD 3-clause licence) https://www.torproject.org\n")
+                    "- Tor (BSD 3-clause licence) https://www.torproject.org\n"
+                    "- WireGuard for Windows installer (MIT/GPL, signed by WireGuard LLC) https://www.wireguard.com\n")
     return 0
 
 

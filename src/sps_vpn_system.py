@@ -21,6 +21,39 @@ def _wireguard_exe():
     return None
 
 
+def bundled_msi(base_dirs):
+    """The official WireGuard MSI shipped next to the app (fetched at build time), or None."""
+    for d in base_dirs:
+        try:
+            for n in sorted(os.listdir(d)):
+                if n.lower().startswith("wireguard") and n.lower().endswith(".msi"):
+                    return os.path.join(d, n)
+        except OSError:
+            pass
+    return None
+
+
+def verify_signature(path):
+    """Windows only: the installer must be signed by WireGuard LLC and the signature must be valid."""
+    ps = ("$s=Get-AuthenticodeSignature -LiteralPath '%s'; if($s.Status -eq 'Valid' -and $s.SignerCertificate.Subject -like '*WireGuard LLC*'){exit 0}else{exit 1}"
+          % path.replace("'", "''"))
+    r = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True, timeout=60)
+    return r.returncode == 0
+
+
+def install_wireguard(base_dirs):
+    """Windows: install the bundled official WireGuard (asks for administrator approval). Returns a message."""
+    if not IS_WIN:
+        return "Linux: sudo apt install wireguard-tools   |   macOS: brew install wireguard-tools"
+    msi = bundled_msi(base_dirs)
+    if not msi:
+        return "The WireGuard installer is not bundled in this build. Download it from https://www.wireguard.com/install/"
+    if not verify_signature(msi):
+        raise RuntimeError("The bundled WireGuard installer failed the signature check (WireGuard LLC). Not installing.")
+    _run_win_elevated(["msiexec.exe", "/i", msi, "/qb"])
+    return "WireGuard is being installed - approve the Windows prompt, wait a few seconds, then press 'Protect WHOLE computer'."
+
+
 def available():
     """(ok, message)"""
     if IS_WIN:

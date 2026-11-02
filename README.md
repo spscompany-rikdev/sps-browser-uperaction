@@ -32,3 +32,11 @@ See `EXTENSION_PUBLISH_GUIDE.md`. Build: `python tools/build_extension.py`.
 
 ## Install everything to build
 `python -m pip install -r requirements.txt` then `python tools/ci_build.py`.
+
+## Android app (SPS Browser for Android)
+Classic white design with a desktop-style toolbar (profile, address bar with lock/star/mic, reload) and a bottom bar (back, forward, new tab, tabs, menu).
+- **Tab manager:** thumbnail grid or list, normal/private switch, search, pin, duplicate, multi-select (close, pin, bookmark, share), close duplicates, close all, sort, recently closed.
+- **Bookmarks, History, Downloads:** full-screen pages with search, long-press multi-select, bulk open/share/delete, history by day, live download progress.
+- **Profiles:** separate settings, bookmarks, history, passwords and (Android 9+) logins per profile.
+- **Passwords & autofill:** save/fill prompts, password generator (random or words), strength and reuse check, address autofill. Everything is encrypted with an Android Keystore key (AES-256-GCM); the screen lock (PIN/pattern/fingerprint) is required before passwords are shown or filled; the screen is protected from screenshots on those pages; copied passwords are cleared from the clipboard after 30 seconds.
+- Settings page, print (whole page and selected area), voice search, reader mode, translate, desktop site, dark pages, ad & tracker blocking.
