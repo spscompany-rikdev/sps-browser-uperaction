@@ -153,6 +153,7 @@ def _selftest():
     check("import sps_updater", lambda: __import__("sps_updater"))
     check("import sps_print (print window)", lambda: __import__("sps_print"))
     check("import sps_vpn_ui (SPS VPN window)", lambda: __import__("sps_vpn_ui"))
+    check("import sps_manager (History/Bookmarks/Cookies/Tabs window)", lambda: __import__("sps_manager"))
     check("import sps_pages (error pages)", lambda: __import__("sps_pages"))
     check("import browser module", lambda: __import__("sps_browser_app"), hard=False)
     if not ok:                                     # help diagnose a missing file from the log alone

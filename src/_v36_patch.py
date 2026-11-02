@@ -537,3 +537,138 @@ def _v39_vpn_badge(self):
 MainWindow._v39_vpn_restart = _v39_vpn_restart
 MainWindow._v39_open_vpn = _v39_open_vpn
 MainWindow._v39_vpn_badge = _v39_vpn_badge
+
+
+# ═══ v38.3: SPS Manager (History / Bookmarks / Cookies / Tabs) + missing helper methods ═══
+def _v38_load_history(self):
+    """List of history entries (newest last) - the Journeys view and others expect this method."""
+    try:
+        with open(self._hist_path(), encoding="utf-8") as f:
+            d = json.load(f)
+        return [e for e in d if isinstance(e, dict)] if isinstance(d, list) else []
+    except Exception:
+        return []
+
+
+def _v38_load_passwords(self):
+    try:
+        return self.password_manager.get_all()
+    except Exception:
+        return []
+
+
+def _v38_save_passwords(self, items):
+    """Replace the saved logins with 'items' (used by CSV import); passwords stay encrypted on disk."""
+    import secrets as _sec
+    pm = self.password_manager
+    clean = []
+    for e in items or []:
+        if isinstance(e, dict) and e.get("password") is not None:
+            e = dict(e); e.setdefault("id", _sec.token_hex(8)); clean.append(e)
+    pm._data = clean
+    pm._save()
+
+
+def _v38_tab_widgets(self):
+    return [(i, self.tabs.widget(i)) for i in range(self.tabs.count()) if self.tabs.widget(i) is not None]
+
+
+def _v38_hooks(self):
+    import sps_manager
+    mw = self
+
+    class H(sps_manager.Hooks):
+        theme = dict(getattr(mw, "_theme", {}) or {})
+        history_path = mw._hist_path()
+        bookmarks_path = mw._bm_path()
+        cookie_tracker = getattr(mw, "_v38_cookies", None)
+        try:
+            cookie_store = mw.browser_profile.cookieStore()
+        except Exception:
+            cookie_store = None
+
+        @staticmethod
+        def save_bookmarks(bms):
+            mw._save_bookmarks(bms)
+
+        @staticmethod
+        def open_url(url, private=False):
+            if url:
+                mw.add_new_tab(QUrl(url), incognito=bool(private))
+
+        @staticmethod
+        def tabs():
+            out = []
+            cur = mw.tabs.currentIndex()
+            for i, w in _v38_tab_widgets(mw):
+                try:
+                    pg = w.page()
+                    txt = mw.tabs.tabText(i) or ""
+                    out.append({"id": id(w), "title": pg.title() or txt, "url": w.url().toString(),
+                                "private": pg.profile().isOffTheRecord(), "muted": pg.isAudioMuted(),
+                                "pinned": txt.startswith("\U0001F4CC"), "sleeping": bool(getattr(pg, "_sps_sleeping", False)),
+                                "active": i == cur})
+                except Exception:
+                    pass
+            return out
+
+        @staticmethod
+        def tab_action(action, ids):
+            ids = set(ids)
+            targets = [(i, w) for i, w in _v38_tab_widgets(mw) if id(w) in ids]
+            if action == "close":
+                for i, w in sorted(targets, key=lambda x: -x[0]):      # from the right, so indexes stay valid
+                    j = mw.tabs.indexOf(w)
+                    if j >= 0:
+                        mw._close_tab(j)
+                return
+            for i, w in targets:
+                try:
+                    pg = w.page()
+                    if action == "goto":
+                        mw.tabs.setCurrentIndex(mw.tabs.indexOf(w)); break
+                    elif action == "mute":
+                        pg.setAudioMuted(True)
+                    elif action == "unmute":
+                        pg.setAudioMuted(False)
+                    elif action == "sleep":
+                        if i != mw.tabs.currentIndex():
+                            pg.setLifecycleState(QWebEnginePage.LifecycleState.Discarded); pg._sps_sleeping = True
+                    elif action == "duplicate":
+                        mw.add_new_tab(QUrl(w.url().toString()), incognito=pg.profile().isOffTheRecord(), focus=False)
+                except Exception:
+                    pass
+    return H
+
+
+def _v38_open_manager(self, page="history"):
+    import sps_manager
+    dlg = sps_manager.SpsManager(_v38_hooks(self), page, self)
+    dlg.exec()
+
+
+MainWindow._load_history = _v38_load_history
+MainWindow._load_passwords = _v38_load_passwords
+MainWindow._save_passwords = _v38_save_passwords
+MainWindow._v38_open_manager = _v38_open_manager
+MainWindow.show_history = lambda self: _v38_open_manager(self, "history")
+MainWindow.show_bookmarks = lambda self: _v38_open_manager(self, "bookmarks")
+MainWindow._show_bookmark_manager = lambda self: _v38_open_manager(self, "bookmarks")
+MainWindow.show_cookie_manager = lambda self: _v38_open_manager(self, "cookies")
+MainWindow.show_tab_organizer = lambda self: _v38_open_manager(self, "tabs")
+MainWindow._show_journeys = lambda self: _v38_open_manager(self, "history")
+
+
+_v38_orig_init = MainWindow.__init__
+
+
+def _v38_init(self, *a, **k):
+    _v38_orig_init(self, *a, **k)
+    try:
+        import sps_manager
+        self._v38_cookies = sps_manager.CookieTracker(self.browser_profile.cookieStore(), self)   # live cookie list for the manager
+    except Exception:
+        self._v38_cookies = None
+
+
+MainWindow.__init__ = _v38_init
