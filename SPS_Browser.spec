@@ -139,7 +139,7 @@ a_core = Analysis(
     pathex=[SRC, GEN],
     binaries=llama_bins,
     datas=extra_datas + llama_datas + certifi_datas,
-    hiddenimports=["sps_browser_app", "sps_filter_engine", "sps_pages", "sps_updater", "sps_ed25519", "sps_print", "sps_vpn", "sps_vpn_ui", "sps_vpn_system", "PyQt6.QtPdf", "PyQt6.QtPdfWidgets", "PyQt6.QtPrintSupport",
+    hiddenimports=["sps_browser_app", "sps_filter_engine", "sps_pages", "sps_updater", "sps_ed25519", "sps_print", "sps_vpn", "sps_vpn_ui", "sps_vpn_system", "sps_manager", "PyQt6.QtPdf", "PyQt6.QtPdfWidgets", "PyQt6.QtPrintSupport",
                    # modules that only the V33/V34 patch files import (PyInstaller cannot see inside data files)
                    "csv", "hashlib", "zipfile", "tempfile", "shutil", "subprocess", "importlib.util", "winreg"] + common_hidden + llama_hidden + tts_hidden +
                   (["numpy", "diskcache", "jinja2", "typing_extensions"] if llama_bins else []) +
