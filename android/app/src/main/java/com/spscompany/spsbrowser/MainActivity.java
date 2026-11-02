@@ -25,6 +25,7 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.Color;
+import android.graphics.Typeface;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -133,7 +134,8 @@ public class MainActivity extends Activity implements Host {
     private static final int REQ_AUTH = 4713;
     private static final int REQ_APPLOCK = 4714;
     private static final int REQ_CAMERA_PERM = 4715;
-    private boolean stripLinks = true, appLock = false, askDownload = false;
+    private boolean stripLinks = true, appLock = false, askDownload = false, dailyQuote = true;
+    private int quoteIndex;
     private final Set<String> shieldOff = new HashSet<>();
     private long blockedTotal, blockedSaved, leftAt;
     private View lockOverlay;
@@ -176,6 +178,7 @@ public class MainActivity extends Activity implements Host {
         stripLinks = prefs.getBoolean("striplinks", true);
         appLock = prefs.getBoolean("applock", false);
         askDownload = prefs.getBoolean("askdownload", false);
+        dailyQuote = prefs.getBoolean("dailyquote", true);
         blockedTotal = prefs.getLong("blocked_total", 0);
         shieldOff.addAll(prefs.getStringSet("shieldoff", new HashSet<String>()));
         lockPending = appLock;
@@ -716,19 +719,32 @@ public class MainActivity extends Activity implements Host {
             if (n++ >= 12) break;
             sites.append(tile(o.optString("t", o.optString("u")), o.optString("u")));
         }
-        String bg = t.priv ? "#F5F0FB" : (darkMode ? "#202124" : "#FFFFFF");
-        String fg = t.priv ? "#3B2A63" : (darkMode ? "#E8EAED" : "#202124");
+        String[] qt = Quotes.at(Quotes.today());
+        boolean dk = darkMode && !t.priv;
+        String bg = t.priv ? "#F3EEFB" : (dk ? "#17181B" : "#F4F6FB");
+        String card = t.priv ? "#FFFFFF" : (dk ? "#24262B" : "#FFFFFF");
+        String fg = t.priv ? "#3B2A63" : (dk ? "#E8EAED" : "#202124");
+        String sub = dk ? "#9AA0A6" : "#6B7280";
+        String hero = t.priv ? "linear-gradient(135deg,#6D4AFF,#B07CFF)" : "linear-gradient(135deg,#1A73E8,#5BA7FF)";
         String page = "<html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>"
-                + "body{font-family:sans-serif;margin:0;padding:56px 20px 30px;text-align:center;background:" + bg + ";color:" + fg + "}"
-                + "h1{font-weight:500;font-size:30px;margin:0 0 4px;letter-spacing:.5px}p{color:#80868b;margin:0 0 26px;font-size:14px}"
-                + "input{width:92%;max-width:520px;box-sizing:border-box;padding:14px 20px;border-radius:28px;border:1px solid #dadce0;background:#fff;font-size:16px;outline:none;box-shadow:0 1px 4px rgba(60,64,67,.15)}"
-                + ".g{display:flex;flex-wrap:wrap;justify-content:center;max-width:520px;margin:34px auto 0}"
-                + ".s{width:76px;margin:8px;text-decoration:none;color:inherit;font-size:12px}"
-                + ".s i{display:flex;align-items:center;justify-content:center;width:52px;height:52px;margin:0 auto 6px;border-radius:50%;background:#f1f3f4;color:#1a73e8;font-style:normal;font-weight:700;font-size:20px}"
+                + "body{font-family:sans-serif;margin:0;padding:18px 16px 36px;background:" + bg + ";color:" + fg + "}"
+                + ".w{max-width:560px;margin:0 auto}"
+                + ".h{border-radius:26px;padding:26px 22px 24px;background:" + hero + ";color:#fff;box-shadow:0 8px 24px rgba(26,115,232,.28)}"
+                + ".h h1{font-weight:600;font-size:26px;margin:0 0 4px}.h p{margin:0 0 18px;font-size:13px;opacity:.9}"
+                + "input{width:100%;box-sizing:border-box;padding:14px 20px;border-radius:26px;border:none;background:#fff;color:#202124;font-size:16px;outline:none}"
+                + ".c{margin-top:16px;border-radius:22px;padding:16px 14px 10px;background:" + card + ";box-shadow:0 2px 10px rgba(0,0,0,.07)}"
+                + ".c h2{margin:0 0 8px 6px;font-size:13px;font-weight:600;letter-spacing:.6px;text-transform:uppercase;color:" + sub + "}"
+                + ".g{display:flex;flex-wrap:wrap}"
+                + ".s{width:25%;box-sizing:border-box;padding:6px 2px;text-align:center;text-decoration:none;color:inherit;font-size:12px}"
+                + ".s i{display:flex;align-items:center;justify-content:center;width:50px;height:50px;margin:0 auto 6px;border-radius:18px;background:#E8F0FE;color:#1A73E8;font-style:normal;font-weight:700;font-size:20px}"
                 + ".s b{display:block;font-weight:400;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
-                + "</style></head><body><h1>SPS Browser</h1><p>" + (t.priv ? "Private tab \u2014 no history is saved" : "Fast, private browsing") + "</p>"
-                + "<form action='" + ENGINE_URLS[engine] + "' method='get'><input name='q' placeholder='Search " + ENGINE_NAMES[engine] + " or type a web address' autocomplete='off'></form>"
-                + "<div class='g'>" + sites + "</div></body></html>";
+                + ".q{position:relative;padding:20px 22px 18px}.q:before{content:'\\201C';position:absolute;left:14px;top:-4px;font-size:64px;color:#1A73E8;opacity:.25;font-family:serif}"
+                + ".q p{margin:6px 0 10px;font-size:16px;line-height:1.5;font-style:italic}.q span{font-size:13px;color:" + sub + ";font-weight:600}"
+                + "</style></head><body><div class='w'><div class='h'><h1>SPS Browser</h1><p>" + (t.priv ? "Private tab \u2014 no history is saved" : "Fast, private browsing") + "</p>"
+                + "<form action='" + ENGINE_URLS[engine] + "' method='get'><input name='q' placeholder='Search " + ENGINE_NAMES[engine] + " or type a web address' autocomplete='off'></form></div>"
+                + "<div class='c'><h2>Shortcuts</h2><div class='g'>" + sites + "</div></div>"
+                + "<div class='c q'><h2>Thought of the day</h2><p>" + android.text.TextUtils.htmlEncode(qt[0]) + "</p><span>\u2014 " + android.text.TextUtils.htmlEncode(qt[1]) + "</span></div>"
+                + "</div></body></html>";
         t.url = NEWTAB_BASE;
         t.title = t.priv ? "New private tab" : "New tab";
         t.web.loadDataWithBaseURL(NEWTAB_BASE, page, "text/html", "utf-8", null);
@@ -1816,6 +1832,7 @@ public class MainActivity extends Activity implements Host {
         settingSwitch(list, "Save browsing history", null, saveHistory, v -> { saveHistory = v; putBool("savehistory", v); });
         settingSwitch(list, "Clear all data when the app closes", null, clearOnExit, v -> { clearOnExit = v; putBool("clearonexit", v); });
 
+        settingSwitch(list, "Thought of the day", "A short saying from a great person once a day", dailyQuote, v -> { dailyQuote = v; putBool("dailyquote", v); });
         settingHeader(list, "Downloads");
         settingSwitch(list, "Ask before downloading", "Shows the file name and size first", askDownload, v -> { askDownload = v; putBool("askdownload", v); });
         settingLink(list, "download", "Downloads", "Open the download manager", this::showDownloads);
@@ -2201,6 +2218,50 @@ public class MainActivity extends Activity implements Host {
 
 
 
+
+    // ───────────────────────────── thought of the day ─────────────────────────────
+    private void showQuote(boolean next) {
+        if (next) quoteIndex++; else quoteIndex = Quotes.today();
+        final String[] q = Quotes.at(quoteIndex);
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(24), dp(22), dp(24), dp(14));
+        card.setBackground(UI.box(this, UI.BG, 26, 0));
+        TextView mark = UI.text(this, "\u201C", 54, UI.ACCENT, true);
+        mark.setIncludeFontPadding(false);
+        card.addView(mark);
+        TextView body = UI.text(this, q[0], 19, UI.TEXT, false);
+        body.setTypeface(Typeface.SERIF, Typeface.ITALIC);
+        body.setLineSpacing(0, 1.2f);
+        card.addView(body);
+        TextView who = UI.text(this, "\u2014 " + q[1], 14, UI.ACCENT, true);
+        who.setPadding(0, dp(14), 0, dp(14));
+        card.addView(who);
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.END);
+        TextView nextB = UI.button(this, "Next", false), copyB = UI.button(this, "Copy", false), okB = UI.button(this, "Close", true);
+        row.addView(nextB); row.addView(copyB); row.addView(okB);
+        card.addView(row);
+        final AlertDialog d = new AlertDialog.Builder(this).setView(card).create();
+        if (d.getWindow() != null) d.getWindow().setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(Color.TRANSPARENT));
+        nextB.setOnClickListener(v -> { d.dismiss(); showQuote(true); });
+        copyB.setOnClickListener(v -> {
+            ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+            if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("quote", "\u201C" + q[0] + "\u201D \u2014 " + q[1]));
+            toast("Copied");
+        });
+        okB.setOnClickListener(v -> d.dismiss());
+        d.show();
+    }
+
+    private void maybeShowDailyQuote() {
+        if (!dailyQuote) return;
+        String key = new java.text.SimpleDateFormat("yyyyMMdd", Locale.US).format(new java.util.Date());
+        if (key.equals(prefs.getString("quote_day", ""))) return;
+        prefs.edit().putString("quote_day", key).apply();
+        root.postDelayed(() -> { if (!isFinishing() && lockOverlay == null) showQuote(false); }, 900);
+    }
+
     // ───────────────────────────── privacy shield page ─────────────────────────────
     private void showShield() {
         if (current == null) return;
@@ -2393,6 +2454,7 @@ public class MainActivity extends Activity implements Host {
     protected void onResume() {
         super.onResume();
         maybeLock();
+        maybeShowDailyQuote();
         for (BTab t : tabs) t.web.onResume();
     }
 
