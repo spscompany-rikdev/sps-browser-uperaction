@@ -3,6 +3,18 @@ package com.spscompany.spsbrowser;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.DownloadManager;
+import android.app.KeyguardManager;
+import android.app.Dialog;
+import android.os.Handler;
+import android.os.Looper;
+import android.webkit.JavascriptInterface;
+import android.widget.ImageView;
+import android.widget.TextView;
+import android.widget.Switch;
+import android.widget.ScrollView;
+import org.json.JSONException;
+import java.util.List;
+import java.util.Date;
 import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.ClipboardManager;
@@ -69,7 +81,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * Tabs, private tabs, bookmarks, history, find in page, desktop site, dark mode, ad/tracker blocking,
  * downloads, file upload, full-screen video, https-only, no analytics. Everything is stored on the phone only.
  */
-public class MainActivity extends Activity {
+public class MainActivity extends Activity implements Host {
 
     private static final String[] ENGINE_NAMES = {"Google", "DuckDuckGo", "Bing", "Brave Search", "Ecosia"};
     private static final String[] ENGINE_URLS = {"https://www.google.com/search", "https://duckduckgo.com/",
@@ -83,18 +95,8 @@ public class MainActivity extends Activity {
     private static final int REQ_MEDIA = 11;
     private static final int REQ_GEO = 12;
 
-    /** One browser tab. */
-    private static class Tab {
-        WebView web;
-        boolean priv;
-        boolean desktop;
-        String title = "New tab";
-        String url = "";
-        String mobileUa;
-    }
-
-    private final ArrayList<Tab> tabs = new ArrayList<>();
-    private Tab current;
+    private final ArrayList<BTab> tabs = new ArrayList<>();
+    private BTab current;
     private final Set<String> blocked = new HashSet<>();
     private final AtomicInteger blockedCount = new AtomicInteger(0);
 
@@ -116,13 +118,35 @@ public class MainActivity extends Activity {
     private int engine = 0;
     private int textSizeIndex = 0;
 
+    private Profiles profiles;
+    private Store store;
+    private final ArrayList<View> pages = new ArrayList<>();
+    private final ArrayList<String[]> recentlyClosed = new ArrayList<>();
+    private LinearLayout bottomBar, pill, bannerSlot;
+    private TextView tabsCountText, profileAvatar;
+    private ImageView lockIcon, starIcon, reloadIcon, backIcon, fwdIcon;
+    private boolean offerSave = true, offerFill = true, requireUnlock = true, switchingProfile;
+    private long unlockedAt, lastSaveOffer;
+    private Runnable pendingUnlock;
+    private final Set<String> neverSave = new HashSet<>();
+    private final Handler ui = new Handler(Looper.getMainLooper());
+    private static final int REQ_AUTH = 4713;
+    private static final int REQ_APPLOCK = 4714;
+    private static final int REQ_CAMERA_PERM = 4715;
+    private boolean stripLinks = true, appLock = false, askDownload = false;
+    private final Set<String> shieldOff = new HashSet<>();
+    private long blockedTotal, blockedSaved, leftAt;
+    private View lockOverlay;
+    private boolean lockPending;
+    private WebChromeClient.FileChooserParams pendingChooser;
+    private Uri cameraOutput;
+
     private FrameLayout root;
     private FrameLayout webHolder;
     private LinearLayout bar;
     private LinearLayout findBar;
     private EditText urlBar;
     private EditText findInput;
-    private Button tabsButton;
     private ProgressBar progress;
     private View customView;
     private WebChromeClient.CustomViewCallback customViewCallback;
@@ -132,7 +156,11 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        prefs = getSharedPreferences("sps", MODE_PRIVATE);
+        Ico.load(this);
+        profiles = new Profiles(this);
+        profiles.applyWebViewData();                       // must happen before the first WebView exists
+        prefs = getSharedPreferences(profiles.prefsName(profiles.activeId()), MODE_PRIVATE);
+        store = new Store(prefs, profiles.activeId());
         adBlock = prefs.getBoolean("adblock", true);
         darkMode = prefs.getBoolean("dark", false);
         thirdPartyCookies = prefs.getBoolean("thirdcookies", false);
@@ -142,18 +170,31 @@ public class MainActivity extends Activity {
         blockShots = prefs.getBoolean("blockshots", false);
         clearOnExit = prefs.getBoolean("clearonexit", false);
         desktopDefault = prefs.getBoolean("desktopdefault", false);
+        offerSave = prefs.getBoolean("offersave", true);
+        offerFill = prefs.getBoolean("offerfill", true);
+        requireUnlock = prefs.getBoolean("requireunlock", true);
+        stripLinks = prefs.getBoolean("striplinks", true);
+        appLock = prefs.getBoolean("applock", false);
+        askDownload = prefs.getBoolean("askdownload", false);
+        blockedTotal = prefs.getLong("blocked_total", 0);
+        shieldOff.addAll(prefs.getStringSet("shieldoff", new HashSet<String>()));
+        lockPending = appLock;
+        neverSave.addAll(prefs.getStringSet("neversave", new HashSet<String>()));
         homeUrl = prefs.getString("home", "");
         engine = Math.max(0, Math.min(ENGINE_URLS.length - 1, prefs.getInt("engine", 0)));
         textSizeIndex = Math.max(0, Math.min(TEXT_SIZES.length - 1, prefs.getInt("textsize", 0)));
         loadBlocklist();
         buildUi();
+        applySystemBars();
 
         boolean any = false;
         try {
             JSONArray saved = new JSONArray(prefs.getString("session", "[]"));
             for (int i = 0; i < saved.length(); i++) {
-                String u = saved.getString(i);
-                newTab(u, false, false);
+                Object e = saved.get(i);
+                String u = e instanceof JSONObject ? ((JSONObject) e).optString("u") : String.valueOf(e);
+                BTab t = newTab(u, false, false);
+                if (e instanceof JSONObject) t.pinned = ((JSONObject) e).optBoolean("p");
                 any = true;
             }
         } catch (Exception ignored) { }
@@ -165,74 +206,126 @@ public class MainActivity extends Activity {
 
     private void buildUi() {
         root = new FrameLayout(this);
-        root.setBackgroundColor(Color.WHITE);
+        root.setBackgroundColor(UI.BG);
 
         LinearLayout column = new LinearLayout(this);
         column.setOrientation(LinearLayout.VERTICAL);
 
+        // ── top toolbar: profile | address pill | reload ──
         bar = new LinearLayout(this);
         bar.setOrientation(LinearLayout.HORIZONTAL);
         bar.setGravity(Gravity.CENTER_VERTICAL);
-        bar.setBackgroundColor(Color.parseColor("#F1F3F4"));
-        bar.setPadding(dp(4), dp(4), dp(4), dp(4));
+        bar.setBackgroundColor(UI.BG);
+        bar.setPadding(dp(10), dp(6), dp(6), dp(6));
 
-        Button back = barButton("◀");
-        Button reload = barButton("↻");
+        Profiles.Profile ap = profiles.active();
+        profileAvatar = UI.avatar(this, ap.name, ap.color, 34);
+        profileAvatar.setOnClickListener(v -> showProfiles());
+        bar.addView(profileAvatar);
+        bar.addView(UI.space(this, 8, 1));
+
+        pill = new LinearLayout(this);
+        pill.setOrientation(LinearLayout.HORIZONTAL);
+        pill.setGravity(Gravity.CENTER_VERTICAL);
+        pill.setBackground(UI.box(this, UI.SURFACE, 22, UI.BORDER));
+        pill.setPadding(dp(12), 0, dp(2), 0);
+        lockIcon = new ImageView(this);
+        lockIcon.setImageDrawable(Ico.of("search", UI.TEXT3));
+        lockIcon.setOnClickListener(v -> showShield());
+        pill.addView(lockIcon, new LinearLayout.LayoutParams(dp(18), dp(18)));
         urlBar = new EditText(this);
         urlBar.setSingleLine(true);
-        urlBar.setTextSize(14);
+        urlBar.setTextSize(15);
+        urlBar.setTextColor(UI.TEXT);
+        urlBar.setHintTextColor(UI.TEXT3);
         urlBar.setHint("Search or type a web address");
         urlBar.setImeOptions(EditorInfo.IME_ACTION_GO);
         urlBar.setInputType(android.text.InputType.TYPE_TEXT_VARIATION_URI);
         urlBar.setSelectAllOnFocus(true);
-        urlBar.setPadding(dp(12), dp(8), dp(12), dp(8));
-        urlBar.setBackgroundColor(Color.WHITE);
-        tabsButton = barButton("1");
-        Button menu = barButton("⋮");
-        Button mic = barButton("🎤");
-
-        bar.addView(back);
-        bar.addView(reload);
-        bar.addView(urlBar, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        bar.addView(mic);
-        bar.addView(tabsButton);
-        bar.addView(menu);
+        urlBar.setBackground(null);
+        urlBar.setPadding(dp(10), 0, dp(6), 0);
+        pill.addView(urlBar, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f));
+        starIcon = UI.icon(this, "star", UI.TEXT2, 38, 9);
+        starIcon.setOnClickListener(v -> toggleBookmark());
+        pill.addView(starIcon);
+        ImageView micIcon = UI.icon(this, "mic", UI.TEXT2, 38, 9);
+        micIcon.setOnClickListener(v -> voiceSearch());
+        pill.addView(micIcon);
+        bar.addView(pill, new LinearLayout.LayoutParams(0, dp(44), 1f));
+        reloadIcon = UI.icon(this, "reload", UI.TEXT, 44, 11);
+        reloadIcon.setOnClickListener(v -> {
+            if (current == null) return;
+            if (current.loading) current.web.stopLoading(); else current.web.reload();
+        });
+        bar.addView(reloadIcon);
+        urlBar.setOnFocusChangeListener((v, focus) -> {
+            boolean pv = current != null && current.priv;
+            pill.setBackground(focus ? UI.box(this, UI.BG, 22, pv ? UI.PRIVATE : UI.ACCENT) : UI.box(this, pv ? UI.PRIVATE_BG : UI.SURFACE, 22, UI.BORDER));
+        });
 
         progress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         progress.setMax(100);
+        progress.setProgressTintList(android.content.res.ColorStateList.valueOf(UI.ACCENT));
         progress.setVisibility(View.GONE);
 
+        // ── find in page ──
         findBar = new LinearLayout(this);
         findBar.setOrientation(LinearLayout.HORIZONTAL);
         findBar.setGravity(Gravity.CENTER_VERTICAL);
-        findBar.setBackgroundColor(Color.parseColor("#E8EAED"));
+        findBar.setBackgroundColor(UI.BG);
+        findBar.setPadding(dp(10), dp(6), dp(4), dp(6));
         findBar.setVisibility(View.GONE);
-        findInput = new EditText(this);
-        findInput.setSingleLine(true);
-        findInput.setHint("Find in page");
-        findInput.setTextSize(14);
-        Button prev = barButton("▲");
-        Button next = barButton("▼");
-        Button closeFind = barButton("✕");
-        findBar.addView(findInput, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        findInput = UI.field(this, "Find in page", false);
+        ImageView prev = UI.icon(this, "up", UI.TEXT, 40, 9);
+        ImageView next = UI.icon(this, "down", UI.TEXT, 40, 9);
+        ImageView closeFind = UI.icon(this, "close", UI.TEXT, 40, 9);
+        findBar.addView(findInput, new LinearLayout.LayoutParams(0, dp(40), 1f));
         findBar.addView(prev);
         findBar.addView(next);
         findBar.addView(closeFind);
 
         webHolder = new FrameLayout(this);
+        bannerSlot = new LinearLayout(this);
+        bannerSlot.setOrientation(LinearLayout.VERTICAL);
+        bannerSlot.setPadding(dp(10), dp(6), dp(10), dp(8));
+        bannerSlot.setBackgroundColor(UI.BG);
+        bannerSlot.setVisibility(View.GONE);
+
+        // ── bottom bar: back | forward | new tab | tabs | menu ──
+        bottomBar = new LinearLayout(this);
+        bottomBar.setOrientation(LinearLayout.HORIZONTAL);
+        bottomBar.setGravity(Gravity.CENTER_VERTICAL);
+        bottomBar.setBackgroundColor(UI.BG);
+        backIcon = UI.icon(this, "back", UI.TEXT, 48, 12);
+        fwdIcon = UI.icon(this, "forward", UI.TEXT, 48, 12);
+        ImageView plus = UI.icon(this, "plus", UI.TEXT, 48, 12);
+        ImageView menuIcon = UI.icon(this, "menu", UI.TEXT, 48, 12);
+        FrameLayout tabsBtn = new FrameLayout(this);
+        tabsBtn.setBackground(UI.ripple(this, Color.TRANSPARENT, 24, 0));
+        tabsBtn.setClickable(true);
+        tabsCountText = UI.text(this, "1", 12, UI.TEXT, true);
+        tabsCountText.setGravity(Gravity.CENTER);
+        tabsCountText.setBackground(UI.box(this, Color.TRANSPARENT, 6, UI.TEXT));
+        tabsBtn.addView(tabsCountText, new FrameLayout.LayoutParams(dp(24), dp(24), Gravity.CENTER));
+        for (View v : new View[]{backIcon, fwdIcon, plus, tabsBtn, menuIcon}) {
+            bottomBar.addView(v, new LinearLayout.LayoutParams(0, dp(52), 1f));
+        }
+        backIcon.setOnClickListener(v -> { if (current != null && current.web.canGoBack()) current.web.goBack(); else if (current != null && tabs.size() > 1) closeTab(current); });
+        fwdIcon.setOnClickListener(v -> { if (current != null && current.web.canGoForward()) current.web.goForward(); });
+        plus.setOnClickListener(v -> newTab(null, current != null && current.priv, true));
+        tabsBtn.setOnClickListener(v -> showTabs());
+        menuIcon.setOnClickListener(v -> showMenu());
 
         column.addView(bar, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        column.addView(progress, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(3)));
+        column.addView(progress, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(2)));
         column.addView(findBar, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         column.addView(webHolder, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        column.addView(bannerSlot, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        column.addView(UI.divider(this));
+        column.addView(bottomBar, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         root.addView(column, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         setContentView(root);
 
-        back.setOnClickListener(v -> { if (current != null && current.web.canGoBack()) current.web.goBack(); });
-        reload.setOnClickListener(v -> { if (current != null) current.web.reload(); });
-        mic.setOnClickListener(v -> voiceSearch());
-        tabsButton.setOnClickListener(v -> showTabs());
-        menu.setOnClickListener(v -> showMenu());
         urlBar.setOnEditorActionListener((v, actionId, event) -> {
             if (actionId == EditorInfo.IME_ACTION_GO || (event != null && event.getKeyCode() == KeyEvent.KEYCODE_ENTER)) {
                 go(urlBar.getText().toString());
@@ -255,8 +348,8 @@ public class MainActivity extends Activity {
     }
 
     // ───────────────────────────── tabs ─────────────────────────────
-    private Tab newTab(String url, boolean priv, boolean show) {
-        Tab t = new Tab();
+    private BTab newTab(String url, boolean priv, boolean show) {
+        BTab t = new BTab();
         t.priv = priv;
         t.web = new WebView(this);
         t.web.setVisibility(View.GONE);
@@ -273,26 +366,76 @@ public class MainActivity extends Activity {
         return t;
     }
 
-    private void switchTo(Tab t) {
+    private void switchTo(BTab t) {
         if (t == null) return;
-        for (Tab o : tabs) o.web.setVisibility(o == t ? View.VISIBLE : View.GONE);
+        if (current != null && current != t) captureThumb(current);
+        for (BTab o : tabs) o.web.setVisibility(o == t ? View.VISIBLE : View.GONE);
         current = t;
-        urlBar.setBackgroundColor(t.priv ? Color.parseColor("#E8DEF8") : Color.WHITE);
+        t.lastUsed = System.currentTimeMillis();
         urlBar.setText(isNewTab(t.url) ? "" : t.url);
         progress.setVisibility(View.GONE);
         closeFindBar();
+        hideBanner();
         applySecure();
         updateTabCount();
+        updateChrome();
+    }
+
+    /** White status and navigation bars with dark icons (classic look). */
+    @SuppressWarnings("deprecation")
+    private void applySystemBars() {
+        try {
+            getWindow().setStatusBarColor(Color.WHITE);
+            getWindow().setNavigationBarColor(Color.WHITE);
+            int f = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+            if (Build.VERSION.SDK_INT >= 26) f |= View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+            getWindow().getDecorView().setSystemUiVisibility(f);
+        } catch (Throwable ignored) { }
+    }
+
+    /** Small picture of the page for the tab manager (never for private tabs). */
+    private void captureThumb(BTab t) {
+        if (t == null || t.priv || t.web == null || t.web.getWidth() <= 0 || t.web.getVisibility() != View.VISIBLE) return;
+        try {
+            int w = t.web.getWidth();
+            int h = Math.min(t.web.getHeight(), w * 4 / 3);
+            float sc = 420f / w;
+            Bitmap b = Bitmap.createBitmap(420, Math.max(1, (int) (h * sc)), Bitmap.Config.RGB_565);
+            android.graphics.Canvas cv = new android.graphics.Canvas(b);
+            cv.drawColor(Color.WHITE);
+            cv.scale(sc, sc);
+            t.web.draw(cv);
+            t.thumb = b;
+        } catch (Throwable ignored) { }
+    }
+
+    /** Address-bar icons, back/forward state and private-tab colours. */
+    private void updateChrome() {
+        if (current == null || urlBar == null) return;
+        boolean nt = isNewTab(current.url);
+        boolean https = current.url != null && current.url.startsWith("https://");
+        UI.setIcon(lockIcon, current.priv ? "incognito" : nt ? "search" : https ? "lock" : "unlock",
+                current.priv ? UI.PRIVATE : nt ? UI.TEXT3 : https ? UI.OK : UI.DANGER);
+        boolean bm = !nt && store.isBookmarked(current.url);
+        UI.setIcon(starIcon, bm ? "starfill" : "star", bm ? UI.ACCENT : UI.TEXT2);
+        starIcon.setVisibility(nt ? View.GONE : View.VISIBLE);
+        if (!urlBar.hasFocus()) pill.setBackground(UI.box(this, current.priv ? UI.PRIVATE_BG : UI.SURFACE, 22, UI.BORDER));
+        boolean cb = current.web.canGoBack() || tabs.size() > 1;
+        UI.setIcon(backIcon, "back", cb ? UI.TEXT : UI.TEXT3);
+        UI.setIcon(fwdIcon, "forward", current.web.canGoForward() ? UI.TEXT : UI.TEXT3);
+        UI.setIcon(reloadIcon, current.loading ? "close" : "reload", UI.TEXT);
     }
 
     /** Private tabs (and the "Block screenshots" setting) switch on FLAG_SECURE: no screenshots, hidden in the app switcher. */
     private void applySecure() {
-        boolean on = blockShots || (current != null && current.priv);
+        boolean secureOpen = false;
+        for (View p : pages) if ("secure".equals(p.getTag())) secureOpen = true;
+        boolean on = blockShots || secureOpen || (current != null && current.priv);
         if (on) getWindow().setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE);
         else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
     }
 
-    private void applyTabSettings(Tab t) {
+    private void applyTabSettings(BTab t) {
         WebSettings ws = t.web.getSettings();
         ws.setJavaScriptEnabled(jsEnabled);
         if (Build.VERSION.SDK_INT >= 26) ws.setSafeBrowsingEnabled(safeBrowsing);
@@ -301,9 +444,13 @@ public class MainActivity extends Activity {
         applyDark(ws);
     }
 
-    private void closeTab(Tab t) {
+    private void closeTab(BTab t) {
         int i = tabs.indexOf(t);
         if (i < 0) return;
+        if (!t.priv && t.url != null && t.url.startsWith("http")) {
+            recentlyClosed.add(new String[]{t.title, t.url});
+            if (recentlyClosed.size() > 25) recentlyClosed.remove(0);
+        }
         webHolder.removeView(t.web);
         if (t.priv) { t.web.clearHistory(); t.web.clearCache(true); }
         t.web.destroy();
@@ -315,36 +462,40 @@ public class MainActivity extends Activity {
             switchTo(tabs.get(Math.max(0, i - 1)));
         }
         updateTabCount();
+        updateChrome();
     }
 
     private void updateTabCount() {
-        if (tabsButton != null) tabsButton.setText(String.valueOf(tabs.size()));
+        if (tabsCountText != null) tabsCountText.setText(tabs.size() > 99 ? ":)" : String.valueOf(tabs.size()));
     }
 
-    private void showTabs() {
-        String[] names = new String[tabs.size()];
-        for (int i = 0; i < names.length; i++) {
-            Tab t = tabs.get(i);
-            String label = (t.priv ? "🕶 " : "") + (t.title == null || t.title.isEmpty() ? t.url : t.title);
-            names[i] = (t == current ? "● " : "") + label;
+    private final TabsPage.Ops tabOps = new TabsPage.Ops() {
+        @Override public List<BTab> tabs() { return tabs; }
+        @Override public BTab current() { return current; }
+        @Override public void switchTo(BTab t) { MainActivity.this.switchTo(t); }
+        @Override public void close(BTab t) { closeTab(t); }
+        @Override public BTab newTab(String url, boolean priv) { return MainActivity.this.newTab(url, priv, url == null); }
+        @Override public void captureThumb(BTab t) { MainActivity.this.captureThumb(t); }
+        @Override public void sortByTitle() {
+            java.util.Collections.sort(tabs, (a, b) -> a.title.compareToIgnoreCase(b.title));
         }
-        new AlertDialog.Builder(this)
-                .setTitle("Tabs (" + tabs.size() + ")")
-                .setItems(names, (d, which) -> switchTo(tabs.get(which)))
-                .setPositiveButton("New tab", (d, w) -> newTab(null, false, true))
-                .setNeutralButton("New private tab", (d, w) -> newTab(null, true, true))
-                .setNegativeButton("Close this tab", (d, w) -> { if (current != null) closeTab(current); })
-                .show();
+        @Override public List<String[]> recentlyClosed() { return recentlyClosed; }
+        @Override public void reopen(String[] e) { MainActivity.this.newTab(e[1], false, true); recentlyClosed.remove(e); }
+    };
+
+    private void showTabs() {
+        hideKeyboard();
+        push(new TabsPage(this, tabOps));
     }
 
     // ───────────────────────────── web view ─────────────────────────────
-    private void setupWebView(final Tab tab) {
+    private void setupWebView(final BTab tab) {
         final WebView web = tab.web;
         WebSettings s = web.getSettings();
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
         s.setAllowFileAccess(false);
-        s.setAllowContentAccess(false);
+        s.setAllowContentAccess(true);          // needed so files and photos picked for upload can be read
         s.setAllowFileAccessFromFileURLs(false);
         s.setAllowUniversalAccessFromFileURLs(false);
         s.setMediaPlaybackRequiresUserGesture(true);
@@ -380,6 +531,11 @@ public class MainActivity extends Activity {
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 Uri u = request.getUrl();
                 String scheme = u.getScheme() == null ? "" : u.getScheme().toLowerCase();
+                if (stripLinks && request.isForMainFrame() && (scheme.equals("https") || scheme.equals("http"))
+                        && !shieldOff.contains(UI.hostOf(u.toString()))) {
+                    String cleaned = Shield.stripTracking(u.toString());
+                    if (!cleaned.equals(u.toString())) { view.loadUrl(cleaned.startsWith("http://") ? "https://" + cleaned.substring(7) : cleaned); return true; }
+                }
                 if (scheme.equals("http")) {                       // upgrade to https
                     view.loadUrl(u.buildUpon().scheme("https").build().toString());
                     return true;
@@ -395,7 +551,10 @@ public class MainActivity extends Activity {
 
             @Override
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
-                if (adBlock && !request.isForMainFrame() && isBlockedHost(request.getUrl().getHost())) {
+                String reqHost = request.getUrl().getHost();
+                String pageHost = UI.hostOf(tab.url);
+                if (adBlock && !request.isForMainFrame() && !shieldOff.contains(pageHost) && isBlockedHost(reqHost)
+                        && Shield.isThirdParty(pageHost, reqHost)) {
                     blockedCount.incrementAndGet();
                     return new WebResourceResponse("text/plain", "utf-8", new ByteArrayInputStream(new byte[0]));
                 }
@@ -405,7 +564,9 @@ public class MainActivity extends Activity {
             @Override
             public void onPageStarted(WebView view, String url, Bitmap favicon) {
                 tab.url = url == null ? "" : url;
+                tab.loading = true;
                 if (tab == current) {
+                    updateChrome();
                     progress.setVisibility(View.VISIBLE);
                     if (!urlBar.hasFocus()) urlBar.setText(isNewTab(tab.url) ? "" : tab.url);
                 }
@@ -414,6 +575,7 @@ public class MainActivity extends Activity {
             @Override
             public void onPageFinished(WebView view, String url) {
                 tab.url = url == null ? "" : url;
+                tab.loading = false;
                 String title = view.getTitle();
                 if (title != null && !title.isEmpty()) tab.title = title;
                 if (tab == current) {
@@ -421,6 +583,7 @@ public class MainActivity extends Activity {
                     if (!urlBar.hasFocus()) urlBar.setText(isNewTab(tab.url) ? "" : tab.url);
                 }
                 if (!tab.priv && saveHistory && !isNewTab(tab.url) && tab.url.startsWith("https://")) addHistory(tab.title, tab.url);
+                afterPageLoad(tab, view);
             }
 
             @Override
@@ -456,6 +619,7 @@ public class MainActivity extends Activity {
                 customViewCallback = callback;
                 root.addView(view, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
                 bar.setVisibility(View.GONE);
+                bottomBar.setVisibility(View.GONE);
                 getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
                         | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN);
             }
@@ -479,19 +643,22 @@ public class MainActivity extends Activity {
             public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback, FileChooserParams params) {
                 if (filePathCallback != null) filePathCallback.onReceiveValue(null);
                 filePathCallback = callback;
-                try {
-                    startActivityForResult(params.createIntent(), FILE_CHOOSER);
-                } catch (ActivityNotFoundException e) {
-                    filePathCallback = null;
-                    return false;
-                }
+                launchFileChooser(params, true);
                 return true;
             }
         });
 
+        web.addJavascriptInterface(new AutofillBridge(tab), "SPSAF");
         web.setOnLongClickListener(v -> onLongPress(tab));
 
-        web.setDownloadListener((url, userAgent, contentDisposition, mimetype, contentLength) -> startDownload(url, userAgent, contentDisposition, mimetype));
+        web.setDownloadListener((url, userAgent, contentDisposition, mimetype, contentLength) -> {
+            if (!askDownload) { startDownload(url, userAgent, contentDisposition, mimetype); return; }
+            String name = URLUtil.guessFileName(url, contentDisposition, mimetype);
+            String size = contentLength > 0 ? "  (" + android.text.format.Formatter.formatShortFileSize(MainActivity.this, contentLength) + ")" : "";
+            new AlertDialog.Builder(MainActivity.this).setTitle("Download file?").setMessage(name + size + "\nfrom " + UI.hostOf(url))
+                    .setPositiveButton("Download", (d, w) -> startDownload(url, userAgent, contentDisposition, mimetype))
+                    .setNegativeButton("Cancel", null).show();
+        });
     }
 
     private void startDownload(String url, String userAgent, String contentDisposition, String mimetype) {
@@ -512,7 +679,7 @@ public class MainActivity extends Activity {
                 r.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
                 r.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, name);
                 long id = ((DownloadManager) getSystemService(DOWNLOAD_SERVICE)).enqueue(r);
-                rememberDownload(id, name);
+                store.addDownload(id, name, url);
                 Toast.makeText(this, "Downloading " + name, Toast.LENGTH_SHORT).show();
             } catch (Exception e) {
                 Toast.makeText(this, "Could not start the download", Toast.LENGTH_SHORT).show();
@@ -525,7 +692,8 @@ public class MainActivity extends Activity {
         root.removeView(customView);
         customView = null;
         bar.setVisibility(View.VISIBLE);
-        getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_VISIBLE);
+        bottomBar.setVisibility(View.VISIBLE);
+        applySystemBars();
         if (customViewCallback != null) customViewCallback.onCustomViewHidden();
     }
 
@@ -537,31 +705,39 @@ public class MainActivity extends Activity {
     }
 
     // ───────────────────────────── new-tab page ─────────────────────────────
-    private void loadNewTabPage(Tab t) {
+    private void loadNewTabPage(BTab t) {
         StringBuilder sites = new StringBuilder();
         String[][] quick = {
                 {"Google", "https://www.google.com/"}, {"YouTube", "https://www.youtube.com/"},
                 {"Wikipedia", "https://www.wikipedia.org/"}, {"GitHub", "https://github.com/"}};
-        for (String[] q : quick) sites.append("<a class='s' href='").append(q[1]).append("'>").append(q[0]).append("</a>");
-        try {
-            JSONArray b = new JSONArray(prefs.getString("bookmarks", "[]"));
-            for (int i = 0; i < b.length() && i < 12; i++) {
-                JSONObject o = b.getJSONObject(i);
-                sites.append("<a class='s' href='").append(android.text.TextUtils.htmlEncode(o.getString("u"))).append("'>")
-                        .append(android.text.TextUtils.htmlEncode(o.optString("t", o.getString("u")))).append("</a>");
-            }
-        } catch (Exception ignored) { }
+        for (String[] q : quick) sites.append(tile(q[0], q[1]));
+        int n = 0;
+        for (JSONObject o : store.bookmarks()) {
+            if (n++ >= 12) break;
+            sites.append(tile(o.optString("t", o.optString("u")), o.optString("u")));
+        }
+        String bg = t.priv ? "#F5F0FB" : (darkMode ? "#202124" : "#FFFFFF");
+        String fg = t.priv ? "#3B2A63" : (darkMode ? "#E8EAED" : "#202124");
         String page = "<html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>"
-                + "body{font-family:sans-serif;margin:0;padding:48px 20px;text-align:center;background:" + (t.priv ? "#2b2438;color:#fff" : (darkMode ? "#202124;color:#e8eaed" : "#fff;color:#202124")) + "}"
-                + "h1{font-weight:500;margin:0 0 6px}p{color:#888;margin:0 0 28px}"
-                + "input{width:90%;max-width:520px;padding:14px 18px;border-radius:26px;border:1px solid #ccc;font-size:16px}"
-                + ".s{display:inline-block;margin:10px;padding:12px 16px;border-radius:12px;background:rgba(128,128,128,.15);color:inherit;text-decoration:none;font-size:14px}"
-                + "</style></head><body><h1>SPS Browser</h1><p>" + (t.priv ? "Private tab: no history is saved" : "Fast, private browsing") + "</p>"
+                + "body{font-family:sans-serif;margin:0;padding:56px 20px 30px;text-align:center;background:" + bg + ";color:" + fg + "}"
+                + "h1{font-weight:500;font-size:30px;margin:0 0 4px;letter-spacing:.5px}p{color:#80868b;margin:0 0 26px;font-size:14px}"
+                + "input{width:92%;max-width:520px;box-sizing:border-box;padding:14px 20px;border-radius:28px;border:1px solid #dadce0;background:#fff;font-size:16px;outline:none;box-shadow:0 1px 4px rgba(60,64,67,.15)}"
+                + ".g{display:flex;flex-wrap:wrap;justify-content:center;max-width:520px;margin:34px auto 0}"
+                + ".s{width:76px;margin:8px;text-decoration:none;color:inherit;font-size:12px}"
+                + ".s i{display:flex;align-items:center;justify-content:center;width:52px;height:52px;margin:0 auto 6px;border-radius:50%;background:#f1f3f4;color:#1a73e8;font-style:normal;font-weight:700;font-size:20px}"
+                + ".s b{display:block;font-weight:400;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
+                + "</style></head><body><h1>SPS Browser</h1><p>" + (t.priv ? "Private tab \u2014 no history is saved" : "Fast, private browsing") + "</p>"
                 + "<form action='" + ENGINE_URLS[engine] + "' method='get'><input name='q' placeholder='Search " + ENGINE_NAMES[engine] + " or type a web address' autocomplete='off'></form>"
-                + "<div style='margin-top:30px'>" + sites + "</div></body></html>";
+                + "<div class='g'>" + sites + "</div></body></html>";
         t.url = NEWTAB_BASE;
         t.title = t.priv ? "New private tab" : "New tab";
         t.web.loadDataWithBaseURL(NEWTAB_BASE, page, "text/html", "utf-8", null);
+    }
+
+    private static String tile(String title, String url) {
+        String t = title == null || title.isEmpty() ? url : title;
+        String letter = android.text.TextUtils.htmlEncode(t.substring(0, 1).toUpperCase());
+        return "<a class='s' href='" + android.text.TextUtils.htmlEncode(url) + "'><i>" + letter + "</i><b>" + android.text.TextUtils.htmlEncode(t) + "</b></a>";
     }
 
     private boolean isNewTab(String url) {
@@ -587,47 +763,6 @@ public class MainActivity extends Activity {
     }
 
     // ───────────────────────────── menu ─────────────────────────────
-    private void showMenu() {
-        if (current == null) return;
-        final ArrayList<String> labels = new ArrayList<>();
-        final ArrayList<Runnable> acts = new ArrayList<>();
-        final boolean page = !isNewTab(current.url);
-        labels.add("New tab"); acts.add(() -> newTab(null, false, true));
-        labels.add("New private tab"); acts.add(() -> newTab(null, true, true));
-        if (page) { labels.add(isBookmarked(current.url) ? "Remove bookmark" : "Add bookmark"); acts.add(this::toggleBookmark); }
-        labels.add("Bookmarks"); acts.add(this::showBookmarks);
-        labels.add("History"); acts.add(this::showHistory);
-        labels.add("Downloads"); acts.add(this::showDownloads);
-        labels.add("Voice search"); acts.add(this::voiceSearch);
-        labels.add("Find in page"); acts.add(this::openFindBar);
-        if (page) {
-            labels.add("Reader mode"); acts.add(this::readerMode);
-            labels.add("Translate page"); acts.add(this::translatePage);
-            labels.add("Print / Save as PDF"); acts.add(this::printPage);
-            labels.add("Print selected area"); acts.add(this::printSelectedArea);
-            labels.add("Copy link"); acts.add(this::copyLink);
-            labels.add("Share page"); acts.add(this::sharePage);
-            labels.add("Open in another browser"); acts.add(this::openExternal);
-        }
-        labels.add(current.desktop ? "Mobile site" : "Desktop site"); acts.add(this::toggleDesktop);
-        labels.add(darkMode ? "Dark mode: ON" : "Dark mode: off"); acts.add(() -> {
-            darkMode = !darkMode; prefs.edit().putBoolean("dark", darkMode).apply();
-            for (Tab t : tabs) applyDark(t.web.getSettings());
-            current.web.reload();
-        });
-        labels.add(adBlock ? "Ad & tracker blocking: ON (" + blockedCount.get() + " blocked)" : "Ad & tracker blocking: off"); acts.add(() -> {
-            adBlock = !adBlock; prefs.edit().putBoolean("adblock", adBlock).apply();
-            Toast.makeText(this, adBlock ? "Ad & tracker blocking on" : "Ad & tracker blocking off", Toast.LENGTH_SHORT).show();
-            current.web.reload();
-        });
-        labels.add("Search engine: " + ENGINE_NAMES[engine]); acts.add(this::chooseEngine);
-        labels.add("Text size: " + TEXT_SIZES[textSizeIndex] + "%"); acts.add(this::cycleTextSize);
-        labels.add("Settings"); acts.add(this::showSettings);
-        labels.add("Clear browsing data"); acts.add(this::clearData);
-        labels.add("About SPS Browser"); acts.add(this::showAbout);
-        new AlertDialog.Builder(this).setItems(labels.toArray(new String[0]), (d, which) -> acts.get(which).run()).show();
-    }
-
     private String searchBase() {
         return ENGINE_URLS[engine];
     }
@@ -646,7 +781,7 @@ public class MainActivity extends Activity {
     private void cycleTextSize() {
         textSizeIndex = (textSizeIndex + 1) % TEXT_SIZES.length;
         prefs.edit().putInt("textsize", textSizeIndex).apply();
-        for (Tab t : tabs) t.web.getSettings().setTextZoom(TEXT_SIZES[textSizeIndex]);
+        for (BTab t : tabs) t.web.getSettings().setTextZoom(TEXT_SIZES[textSizeIndex]);
         Toast.makeText(this, "Text size " + TEXT_SIZES[textSizeIndex] + "%", Toast.LENGTH_SHORT).show();
     }
 
@@ -683,7 +818,7 @@ public class MainActivity extends Activity {
 
     /** Strips the page down to its headings and paragraphs (a simple reader view). */
     private void readerMode() {
-        final Tab t = current;
+        final BTab t = current;
         String js = "(function(){var a=document.querySelector('article')||document.querySelector('main')||document.body;"
                 + "var ps=a.querySelectorAll('h1,h2,h3,p,li');var out=[];"
                 + "for(var i=0;i<ps.length;i++){var e=ps[i];var x=(e.innerText||'').trim();"
@@ -710,7 +845,7 @@ public class MainActivity extends Activity {
     }
 
     /** Long press on a link or an image. */
-    private boolean onLongPress(final Tab tab) {
+    private boolean onLongPress(final BTab tab) {
         WebView.HitTestResult r = tab.web.getHitTestResult();
         if (r == null) return false;
         final String extra = r.getExtra();
@@ -745,7 +880,7 @@ public class MainActivity extends Activity {
         return "perm:" + origin + ":" + kind;
     }
 
-    private void handleWebPermission(final Tab tab, final PermissionRequest request) {
+    private void handleWebPermission(final BTab tab, final PermissionRequest request) {
         final String origin = request.getOrigin() == null ? "this site" : request.getOrigin().toString();
         ArrayList<String> allowed = new ArrayList<>();
         ArrayList<String> androidPerms = new ArrayList<>();
@@ -780,7 +915,7 @@ public class MainActivity extends Activity {
         requestPermissions(missing.toArray(new String[0]), REQ_MEDIA);
     }
 
-    private void handleGeoPermission(final Tab tab, final String origin, final GeolocationPermissions.Callback callback) {
+    private void handleGeoPermission(final BTab tab, final String origin, final GeolocationPermissions.Callback callback) {
         runOnUiThread(() -> {
             String saved = tab.priv ? "" : prefs.getString(permKey(origin, "location"), "");
             if (saved.equals("deny")) { callback.invoke(origin, false, false); return; }
@@ -821,6 +956,12 @@ public class MainActivity extends Activity {
 
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        if (requestCode == REQ_CAMERA_PERM) {
+            WebChromeClient.FileChooserParams p = pendingChooser;
+            pendingChooser = null;
+            if (p != null && filePathCallback != null) launchFileChooser(p, false);     // with or without the camera
+            return;
+        }
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         boolean ok = grantResults.length > 0;
         for (int r : grantResults) if (r != PackageManager.PERMISSION_GRANTED) ok = false;
@@ -855,119 +996,7 @@ public class MainActivity extends Activity {
     }
 
     // ───────────────────────────── download manager ─────────────────────────────
-    private void rememberDownload(long id, String name) {
-        try {
-            JSONArray a = new JSONArray(prefs.getString("downloads", "[]"));
-            JSONObject o = new JSONObject();
-            o.put("id", id);
-            o.put("n", name);
-            a.put(o);
-            JSONArray trimmed = new JSONArray();
-            for (int i = Math.max(0, a.length() - 100); i < a.length(); i++) trimmed.put(a.get(i));
-            prefs.edit().putString("downloads", trimmed.toString()).apply();
-        } catch (Exception ignored) { }
-    }
-
-    private void showDownloads() {
-        final DownloadManager dm = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
-        final ArrayList<Long> ids = new ArrayList<>();
-        final ArrayList<String> labels = new ArrayList<>();
-        final ArrayList<Boolean> done = new ArrayList<>();
-        try {
-            JSONArray a = new JSONArray(prefs.getString("downloads", "[]"));
-            for (int i = a.length() - 1; i >= 0; i--) {                    // newest first
-                JSONObject o = a.getJSONObject(i);
-                long id = o.getLong("id");
-                String status = "removed";
-                boolean ok = false;
-                Cursor c = dm.query(new DownloadManager.Query().setFilterById(id));
-                if (c != null) {
-                    try {
-                        if (c.moveToFirst()) {
-                            int st = c.getInt(c.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS));
-                            long total = c.getLong(c.getColumnIndexOrThrow(DownloadManager.COLUMN_TOTAL_SIZE_BYTES));
-                            long got = c.getLong(c.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR));
-                            if (st == DownloadManager.STATUS_SUCCESSFUL) { status = "done"; ok = true; }
-                            else if (st == DownloadManager.STATUS_FAILED) status = "failed";
-                            else if (st == DownloadManager.STATUS_PAUSED) status = "paused";
-                            else status = total > 0 ? (got * 100 / total) + "%" : "downloading";
-                        }
-                    } finally { c.close(); }
-                }
-                ids.add(id); done.add(ok);
-                labels.add(o.optString("n", "file") + "  \u2014  " + status);
-            }
-        } catch (Exception ignored) { }
-        if (ids.isEmpty()) { Toast.makeText(this, "No downloads yet", Toast.LENGTH_SHORT).show(); return; }
-        new AlertDialog.Builder(this).setTitle("Downloads")
-                .setItems(labels.toArray(new String[0]), (d, which) -> downloadActions(dm, ids.get(which), done.get(which)))
-                .setNeutralButton("Open Downloads app", (d, w) -> startActivity(new Intent(DownloadManager.ACTION_VIEW_DOWNLOADS)))
-                .setNegativeButton("Close", null).show();
-    }
-
-    private void downloadActions(final DownloadManager dm, final long id, final boolean finished) {
-        final ArrayList<String> labels = new ArrayList<>();
-        final ArrayList<Runnable> acts = new ArrayList<>();
-        if (finished) {
-            labels.add("Open"); acts.add(() -> {
-                try {
-                    Uri u = dm.getUriForDownloadedFile(id);
-                    Intent i = new Intent(Intent.ACTION_VIEW);
-                    i.setDataAndType(u, dm.getMimeTypeForDownloadedFile(id));
-                    i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-                    startActivity(i);
-                } catch (Exception e) {
-                    Toast.makeText(this, "No app can open this file", Toast.LENGTH_SHORT).show();
-                }
-            });
-        }
-        labels.add("Delete (file too)"); acts.add(() -> { dm.remove(id); Toast.makeText(this, "Deleted", Toast.LENGTH_SHORT).show(); });
-        new AlertDialog.Builder(this).setItems(labels.toArray(new String[0]), (d, which) -> acts.get(which).run()).show();
-    }
-
     // ───────────────────────────── settings ─────────────────────────────
-    private void showSettings() {
-        final String[] names = {
-                "Block ads & trackers",
-                "Allow third-party cookies",
-                "JavaScript",
-                "Safe Browsing (warn about dangerous sites)",
-                "Save browsing history",
-                "Block screenshots (always)",
-                "Clear all data when the app closes",
-                "Request desktop sites by default",
-                "Force dark pages"};
-        final boolean[] on = {adBlock, thirdPartyCookies, jsEnabled, safeBrowsing, saveHistory, blockShots, clearOnExit, desktopDefault, darkMode};
-        new AlertDialog.Builder(this).setTitle("Settings")
-                .setMultiChoiceItems(names, on, (d, which, checked) -> on[which] = checked)
-                .setPositiveButton("Save", (d, w) -> {
-                    adBlock = on[0]; thirdPartyCookies = on[1]; jsEnabled = on[2]; safeBrowsing = on[3]; saveHistory = on[4];
-                    blockShots = on[5]; clearOnExit = on[6]; desktopDefault = on[7]; darkMode = on[8];
-                    prefs.edit().putBoolean("adblock", adBlock).putBoolean("thirdcookies", thirdPartyCookies).putBoolean("js", jsEnabled)
-                            .putBoolean("safebrowsing", safeBrowsing).putBoolean("savehistory", saveHistory).putBoolean("blockshots", blockShots)
-                            .putBoolean("clearonexit", clearOnExit).putBoolean("desktopdefault", desktopDefault).putBoolean("dark", darkMode).apply();
-                    for (Tab t : tabs) applyTabSettings(t);
-                    applySecure();
-                    if (current != null) current.web.reload();
-                    Toast.makeText(this, "Settings saved", Toast.LENGTH_SHORT).show();
-                })
-                .setNeutralButton("More\u2026", (d, w) -> showMoreSettings())
-                .setNegativeButton("Cancel", null).show();
-    }
-
-    private void showMoreSettings() {
-        final ArrayList<String> labels = new ArrayList<>();
-        final ArrayList<Runnable> acts = new ArrayList<>();
-        labels.add("Search engine: " + ENGINE_NAMES[engine]); acts.add(this::chooseEngine);
-        labels.add("Text size: " + TEXT_SIZES[textSizeIndex] + "%"); acts.add(this::cycleTextSize);
-        labels.add("Home page: " + (homeUrl.isEmpty() ? "new tab page" : homeUrl)); acts.add(this::chooseHome);
-        labels.add("Reset saved site permissions"); acts.add(this::resetSitePermissions);
-        labels.add("Clear browsing data"); acts.add(this::clearData);
-        new AlertDialog.Builder(this).setTitle("More settings")
-                .setItems(labels.toArray(new String[0]), (d, which) -> acts.get(which).run())
-                .setNegativeButton("Close", null).show();
-    }
-
     private void chooseHome() {
         final EditText input = new EditText(this);
         input.setSingleLine(true);
@@ -981,14 +1010,6 @@ public class MainActivity extends Activity {
                     prefs.edit().putString("home", homeUrl).apply();
                 })
                 .setNegativeButton("Cancel", null).show();
-    }
-
-    private void clearAllDataNow() {
-        CookieManager.getInstance().removeAllCookies(null);
-        CookieManager.getInstance().flush();
-        WebStorage.getInstance().deleteAllData();
-        prefs.edit().putString("history", "[]").putString("session", "[]").apply();
-        for (Tab t : tabs) { t.web.clearCache(true); t.web.clearHistory(); t.web.clearFormData(); }
     }
 
     // ───────────────────────────── printing ─────────────────────────────
@@ -1009,7 +1030,7 @@ public class MainActivity extends Activity {
 
     /** Selected area: drag a box on the page; only that part is printed (as a picture). */
     private void printSelectedArea() {
-        final Tab t = current;
+        final BTab t = current;
         if (t == null) return;
         Toast.makeText(this, "Drag a box around the part to print", Toast.LENGTH_LONG).show();
         final SelectionView sel = new SelectionView(this);
@@ -1141,11 +1162,13 @@ public class MainActivity extends Activity {
         try { v = getPackageManager().getPackageInfo(getPackageName(), 0).versionName; } catch (Exception ignored) { }
         new AlertDialog.Builder(this).setTitle("SPS Browser " + v)
                 .setMessage("A private browser for Android.\n\n"
-                        + "• No analytics, no tracking, no account\n"
-                        + "• Pages load over https only\n"
-                        + "• Ad and tracker blocking, private tabs, bookmarks, history\n"
-                        + "• Everything is stored on this phone only\n\n"
-                        + "Private tabs do not save history or use the cache; cookies are shared with normal tabs until you choose "
+                        + "\u2022 No analytics, no tracking, no account\n"
+                        + "\u2022 Pages load over https only\n"
+                        + "\u2022 Ad and tracker blocking, private tabs, tab manager\n"
+                        + "\u2022 Profiles with separate bookmarks, history, passwords and logins\n"
+                        + "\u2022 Passwords, autofill info, bookmarks and history are encrypted with a key that never leaves this phone\n"
+                        + "\u2022 Everything is stored on this phone only\n\n"
+                        + "Private tabs do not save history or use the cache; cookies are shared with normal tabs of the same profile until you choose "
                         + "\"Clear browsing data\".")
                 .setPositiveButton("OK", null).show();
     }
@@ -1161,84 +1184,6 @@ public class MainActivity extends Activity {
     }
 
     // ───────────────────────────── bookmarks and history ─────────────────────────────
-    private boolean isBookmarked(String url) {
-        try {
-            JSONArray b = new JSONArray(prefs.getString("bookmarks", "[]"));
-            for (int i = 0; i < b.length(); i++) if (b.getJSONObject(i).getString("u").equals(url)) return true;
-        } catch (Exception ignored) { }
-        return false;
-    }
-
-    private void toggleBookmark() {
-        if (isNewTab(current.url)) { Toast.makeText(this, "Open a page first", Toast.LENGTH_SHORT).show(); return; }
-        try {
-            JSONArray b = new JSONArray(prefs.getString("bookmarks", "[]"));
-            JSONArray out = new JSONArray();
-            boolean removed = false;
-            for (int i = 0; i < b.length(); i++) {
-                JSONObject o = b.getJSONObject(i);
-                if (o.getString("u").equals(current.url)) removed = true; else out.put(o);
-            }
-            if (!removed) {
-                JSONObject o = new JSONObject();
-                o.put("t", current.title);
-                o.put("u", current.url);
-                out.put(o);
-            }
-            prefs.edit().putString("bookmarks", out.toString()).apply();
-            Toast.makeText(this, removed ? "Bookmark removed" : "Bookmarked", Toast.LENGTH_SHORT).show();
-        } catch (Exception e) {
-            Toast.makeText(this, "Could not save the bookmark", Toast.LENGTH_SHORT).show();
-        }
-    }
-
-    private void showBookmarks() {
-        try {
-            final JSONArray b = new JSONArray(prefs.getString("bookmarks", "[]"));
-            if (b.length() == 0) { Toast.makeText(this, "No bookmarks yet", Toast.LENGTH_SHORT).show(); return; }
-            String[] names = new String[b.length()];
-            for (int i = 0; i < names.length; i++) names[i] = b.getJSONObject(i).optString("t", b.getJSONObject(i).getString("u"));
-            new AlertDialog.Builder(this).setTitle("Bookmarks")
-                    .setItems(names, (d, which) -> {
-                        try { current.web.loadUrl(b.getJSONObject(which).getString("u")); } catch (Exception ignored) { }
-                    })
-                    .setNegativeButton("Close", null).show();
-        } catch (Exception ignored) { }
-    }
-
-    private void addHistory(String title, String url) {
-        try {
-            JSONArray h = new JSONArray(prefs.getString("history", "[]"));
-            if (h.length() > 0 && h.getJSONObject(h.length() - 1).getString("u").equals(url)) return;   // same page twice in a row
-            JSONObject o = new JSONObject();
-            o.put("t", title == null ? url : title);
-            o.put("u", url);
-            h.put(o);
-            JSONArray trimmed = new JSONArray();
-            for (int i = Math.max(0, h.length() - 300); i < h.length(); i++) trimmed.put(h.get(i));   // keep the last 300
-            prefs.edit().putString("history", trimmed.toString()).apply();
-        } catch (Exception ignored) { }
-    }
-
-    private void showHistory() {
-        try {
-            final JSONArray h = new JSONArray(prefs.getString("history", "[]"));
-            if (h.length() == 0) { Toast.makeText(this, "History is empty", Toast.LENGTH_SHORT).show(); return; }
-            final int n = h.length();
-            String[] names = new String[n];
-            for (int i = 0; i < n; i++) {                       // newest first
-                JSONObject o = h.getJSONObject(n - 1 - i);
-                names[i] = o.optString("t", o.getString("u"));
-            }
-            new AlertDialog.Builder(this).setTitle("History")
-                    .setItems(names, (d, which) -> {
-                        try { current.web.loadUrl(h.getJSONObject(n - 1 - which).getString("u")); } catch (Exception ignored) { }
-                    })
-                    .setNeutralButton("Clear history", (d, w) -> prefs.edit().putString("history", "[]").apply())
-                    .setNegativeButton("Close", null).show();
-        } catch (Exception ignored) { }
-    }
-
     // ───────────────────────────── find in page ─────────────────────────────
     private void openFindBar() {
         findBar.setVisibility(View.VISIBLE);
@@ -1299,12 +1244,1100 @@ public class MainActivity extends Activity {
         urlBar.clearFocus();
     }
 
+
+    // ───────────────────────────── file and photo upload ─────────────────────────────
+    private static String[] acceptTypes(WebChromeClient.FileChooserParams p) {
+        ArrayList<String> out = new ArrayList<>();
+        String[] a = p.getAcceptTypes();
+        if (a != null) for (String t : a) {
+            if (t == null) continue;
+            for (String one : t.split(",")) {
+                one = one.trim().toLowerCase(Locale.ROOT);
+                if (one.isEmpty()) continue;
+                if (one.startsWith(".")) {                                   // ".pdf" -> application/pdf
+                    String m = android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(one.substring(1));
+                    one = m == null ? "*/*" : m;
+                }
+                if (!out.contains(one)) out.add(one);
+            }
+        }
+        if (out.isEmpty()) out.add("*/*");
+        return out.toArray(new String[0]);
+    }
+
+    /** Opens the system file / photo picker. When the page asks for a camera capture, the camera permission is requested first. */
+    private void launchFileChooser(WebChromeClient.FileChooserParams params, boolean mayAskPermission) {
+        String[] types = acceptTypes(params);
+        boolean wantImage = false, wantVideo = false;
+        for (String t : types) { if (t.startsWith("image/") || t.equals("*/*")) wantImage |= !t.equals("*/*") || params.isCaptureEnabled(); if (t.startsWith("video/")) wantVideo = true; }
+        boolean capture = params.isCaptureEnabled() && (wantImage || wantVideo);
+        boolean camOk = checkSelfPermission(android.Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED;
+        if (capture && !camOk && mayAskPermission) {
+            pendingChooser = params;
+            requestPermissions(new String[]{android.Manifest.permission.CAMERA}, REQ_CAMERA_PERM);
+            return;
+        }
+        cameraOutput = null;
+        Intent pick = new Intent(Intent.ACTION_GET_CONTENT);
+        pick.addCategory(Intent.CATEGORY_OPENABLE);
+        if (types.length == 1) pick.setType(types[0]);
+        else { pick.setType("*/*"); pick.putExtra(Intent.EXTRA_MIME_TYPES, types); }
+        if (params.getMode() == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE) pick.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+        Intent chooser = Intent.createChooser(pick, "Choose a file");
+        if (camOk && (capture || wantImage)) {
+            try {
+                android.content.ContentValues cv = new android.content.ContentValues();
+                cv.put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, "SPS_" + System.currentTimeMillis() + ".jpg");
+                cv.put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/jpeg");
+                Uri out = getContentResolver().insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv);
+                if (out != null) {
+                    cameraOutput = out;
+                    Intent cam = new Intent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE);
+                    cam.putExtra(android.provider.MediaStore.EXTRA_OUTPUT, out);
+                    cam.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                    if (capture) { pick = cam; chooser = cam; }
+                    else chooser.putExtra(Intent.EXTRA_INITIAL_INTENTS, new Intent[]{cam});
+                }
+            } catch (Exception ignored) { cameraOutput = null; }
+        }
+        try {
+            startActivityForResult(chooser, FILE_CHOOSER);
+        } catch (Exception e) {
+            finishFileChooser(null);
+            toast("No app can pick files on this phone");
+        }
+    }
+
+    private void finishFileChooser(Uri[] results) {
+        ValueCallback<Uri[]> cb = filePathCallback;
+        filePathCallback = null;
+        if (cb != null) cb.onReceiveValue(results);
+    }
+
+    private void onFileChosen(int resultCode, Intent data) {
+        Uri[] results = null;
+        Uri cam = cameraOutput;
+        cameraOutput = null;
+        if (resultCode == RESULT_OK) {
+            ArrayList<Uri> list = new ArrayList<>();
+            if (data != null) {
+                if (data.getClipData() != null) {
+                    for (int i = 0; i < data.getClipData().getItemCount(); i++) {
+                        Uri u = data.getClipData().getItemAt(i).getUri();
+                        if (u != null) list.add(u);
+                    }
+                } else if (data.getData() != null) {
+                    list.add(data.getData());
+                }
+            }
+            if (list.isEmpty() && cam != null) { list.add(cam); cam = null; }       // the camera app was used
+            if (!list.isEmpty()) results = list.toArray(new Uri[0]);
+        }
+        if (cam != null) { try { getContentResolver().delete(cam, null, null); } catch (Exception ignored) { } }   // unused empty photo entry
+        finishFileChooser(results);
+        if (results == null && resultCode == RESULT_OK) toast("The file could not be read");
+    }
+
+    // ───────────────────────────── pages (Host) ─────────────────────────────
+    @Override public Activity act() { return this; }
+    @Override public Store store() { return store; }
+
+    @Override
+    public void open(String url, boolean newTab) {
+        if (newTab || current == null) newTab(url, false, true); else current.web.loadUrl(url);
+    }
+
+    @Override
+    public void push(View page) {
+        hideKeyboard();
+        pages.add(page);
+        root.addView(page, UI.match());
+        page.setAlpha(0f);
+        page.animate().alpha(1f).setDuration(130).start();
+        applySecure();
+    }
+
+    @Override
+    public void pop() {
+        if (pages.isEmpty()) return;
+        View top = pages.remove(pages.size() - 1);
+        root.removeView(top);
+        applySecure();
+        updateChrome();
+        updateTabCount();
+    }
+
+    void refreshTopPage() {
+        if (pages.isEmpty()) return;
+        View top = pages.get(pages.size() - 1);
+        if (top instanceof ListPage) ((ListPage) top).refresh();
+    }
+
+    @Override public void toast(String s) { Toast.makeText(this, s, Toast.LENGTH_SHORT).show(); }
+
+    @Override
+    public void share(String text) {
+        Intent i = new Intent(Intent.ACTION_SEND);
+        i.setType("text/plain");
+        i.putExtra(Intent.EXTRA_TEXT, text);
+        startActivity(Intent.createChooser(i, "Share"));
+    }
+
+    @Override
+    public void copySecret(String text) {
+        ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        if (cm == null) return;
+        final ClipData clip = ClipData.newPlainText("SPS", text);
+        if (Build.VERSION.SDK_INT >= 33) {
+            android.os.PersistableBundle pb = new android.os.PersistableBundle();
+            pb.putBoolean("android.content.extra.IS_SENSITIVE", true);       // keyboards / the clipboard preview hide it
+            clip.getDescription().setExtras(pb);
+        }
+        cm.setPrimaryClip(clip);
+        toast("Copied - clipboard clears in 30 seconds");
+        final ClipboardManager fcm = cm;
+        ui.postDelayed(() -> {
+            try {
+                if (Build.VERSION.SDK_INT >= 28) fcm.clearPrimaryClip(); else fcm.setPrimaryClip(ClipData.newPlainText("", ""));
+            } catch (Throwable ignored) { }
+        }, 30000);
+    }
+
+    /** Asks for the phone's screen lock (PIN, pattern, fingerprint) before saved passwords are used. Valid for 2 minutes. */
+    @Override
+    @SuppressWarnings("deprecation")
+    public void unlock(Runnable ok) {
+        long now = System.currentTimeMillis();
+        KeyguardManager km = (KeyguardManager) getSystemService(Context.KEYGUARD_SERVICE);
+        if (!requireUnlock || km == null || !km.isDeviceSecure() || now - unlockedAt < 120000) { ok.run(); return; }
+        Intent i = km.createConfirmDeviceCredentialIntent("SPS Browser", "Confirm your screen lock to use saved passwords");
+        if (i == null) { ok.run(); return; }
+        pendingUnlock = ok;
+        try {
+            startActivityForResult(i, REQ_AUTH);
+        } catch (Exception e) {
+            pendingUnlock = null;
+            toast("Could not ask for the screen lock");
+        }
+    }
+
+    // ───────────────────────────── main menu ─────────────────────────────
+    private View quickAction(final Dialog[] d, String icon, String label, boolean enabled, final Runnable r) {
+        LinearLayout b = new LinearLayout(this);
+        b.setOrientation(LinearLayout.VERTICAL);
+        b.setGravity(Gravity.CENTER);
+        b.setPadding(0, dp(10), 0, dp(10));
+        ImageView i = new ImageView(this);
+        i.setImageDrawable(Ico.of(icon, enabled ? UI.TEXT : UI.TEXT3));
+        b.addView(i, new LinearLayout.LayoutParams(dp(24), dp(24)));
+        TextView t = UI.text(this, label, 11, enabled ? UI.TEXT2 : UI.TEXT3, false);
+        t.setPadding(0, dp(4), 0, 0);
+        b.addView(t);
+        if (enabled) {
+            b.setBackground(UI.ripple(this, Color.TRANSPARENT, 12, 0));
+            b.setOnClickListener(v -> { d[0].dismiss(); r.run(); });
+        }
+        b.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        return b;
+    }
+
+    private void menuRow(LinearLayout box, final Dialog[] d, String icon, String label, String sub, final Runnable r) {
+        LinearLayout row = UI.row(this, icon, label, sub, UI.TEXT2);
+        row.setOnClickListener(v -> { d[0].dismiss(); r.run(); });
+        box.addView(row);
+    }
+
+    private void showMenu() {
+        if (current == null) return;
+        final boolean page = !isNewTab(current.url);
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(0, 0, 0, dp(14));
+        final Dialog[] d = new Dialog[1];
+        LinearLayout quick = new LinearLayout(this);
+        quick.setPadding(dp(8), dp(2), dp(8), dp(2));
+        boolean bm = page && store.isBookmarked(current.url);
+        quick.addView(quickAction(d, "forward", "Forward", current.web.canGoForward(), () -> current.web.goForward()));
+        quick.addView(quickAction(d, bm ? "starfill" : "star", bm ? "Bookmarked" : "Bookmark", page, this::toggleBookmark));
+        quick.addView(quickAction(d, "share", "Share", page, this::sharePage));
+        quick.addView(quickAction(d, "print", "Print", page, this::printPage));
+        quick.addView(quickAction(d, "reload", "Reload", true, () -> current.web.reload()));
+        box.addView(quick);
+        box.addView(UI.divider(this));
+        menuRow(box, d, "plus", "New tab", null, () -> newTab(null, false, true));
+        menuRow(box, d, "incognito", "New private tab", null, () -> newTab(null, true, true));
+        menuRow(box, d, "user", "Profiles", profiles.active().name, this::showProfiles);
+        box.addView(UI.divider(this));
+        menuRow(box, d, "star", "Bookmarks", null, this::showBookmarks);
+        menuRow(box, d, "history", "History", null, this::showHistory);
+        menuRow(box, d, "download", "Downloads", null, this::showDownloads);
+        menuRow(box, d, "key", "Passwords", store.isSecure() ? "Encrypted, protected by your screen lock" : "Not available on this phone", () -> Vault.openList(this));
+        box.addView(UI.divider(this));
+        menuRow(box, d, "find", "Find in page", null, this::openFindBar);
+        if (page) {
+            menuRow(box, d, "reader", "Reader mode", null, this::readerMode);
+            menuRow(box, d, "translate", "Translate page", null, this::translatePage);
+            menuRow(box, d, "magic", "Fill form (autofill info)", null, this::fillAddress);
+            menuRow(box, d, "print", "Print selected area", "Drag a box around the part to print", this::printSelectedArea);
+            menuRow(box, d, "copy", "Copy link", null, this::copyLink);
+            menuRow(box, d, "external", "Open in another browser", null, this::openExternal);
+        }
+        menuRow(box, d, current.desktop ? "phone" : "desktop", current.desktop ? "Mobile site" : "Desktop site", null, this::toggleDesktop);
+        menuRow(box, d, "dark", "Dark pages", darkMode ? "On" : "Off", () -> {
+            darkMode = !darkMode; prefs.edit().putBoolean("dark", darkMode).apply();
+            for (BTab t : tabs) applyDark(t.web.getSettings());
+            current.web.reload();
+        });
+        menuRow(box, d, "shield", "Ad & tracker blocking", adBlock ? "On  •  " + blockedCount.get() + " blocked this session" : "Off", () -> {
+            adBlock = !adBlock; prefs.edit().putBoolean("adblock", adBlock).apply();
+            toast(adBlock ? "Ad & tracker blocking on" : "Ad & tracker blocking off");
+            current.web.reload();
+        });
+        menuRow(box, d, "mic", "Voice search", null, this::voiceSearch);
+        box.addView(UI.divider(this));
+        menuRow(box, d, "settings", "Settings", null, this::showSettings);
+        menuRow(box, d, "trash", "Clear browsing data", null, this::clearData);
+        menuRow(box, d, "info", "About SPS Browser", null, this::showAbout);
+        d[0] = UI.sheet(this, box);
+        d[0].show();
+    }
+
+    // ───────────────────────────── bookmarks ─────────────────────────────
+    private void toggleBookmark() {
+        if (current == null || isNewTab(current.url)) { toast("Open a page first"); return; }
+        if (store.isBookmarked(current.url)) { store.removeBookmarkUrl(current.url); toast("Bookmark removed"); }
+        else { store.addBookmark(current.title, current.url); toast("Bookmarked"); }
+        updateChrome();
+    }
+
+    private void showBookmarks() {
+        ListPage p = new ListPage(this, "Bookmarks", () -> {
+            List<ListPage.Item> out = new ArrayList<>();
+            List<JSONObject> l = store.bookmarks();
+            for (int i = l.size() - 1; i >= 0; i--) {
+                JSONObject o = l.get(i);
+                ListPage.Item it = new ListPage.Item();
+                it.id = o.optString("id");
+                it.title = o.optString("t");
+                it.sub = o.optString("u");
+                it.tag = o;
+                out.add(it);
+            }
+            return out;
+        }, it -> { open(it.sub, false); pop(); })
+                .empty("No bookmarks yet.\nTap the star in the address bar to add one.", "star")
+                .bulk("Open in new tabs", "external", false, sel -> { for (ListPage.Item it : sel) newTab(it.sub, false, false); toast(sel.size() + " tabs opened"); })
+                .bulk("Share", "share", false, sel -> {
+                    StringBuilder sb = new StringBuilder();
+                    for (ListPage.Item it : sel) sb.append(it.title).append("\n").append(it.sub).append("\n\n");
+                    share(sb.toString().trim());
+                })
+                .bulk("Edit", "edit", false, sel -> { if (sel.size() == 1) editBookmark(sel.get(0)); else toast("Select one bookmark to edit"); })
+                .bulk("Delete", "trash", true, sel -> {
+                    Set<String> ids = new HashSet<>();
+                    for (ListPage.Item it : sel) ids.add(it.id);
+                    store.removeBookmarks(ids);
+                    updateChrome();
+                });
+        p.menu("Bookmark this page", false, s -> toggleBookmark());
+        p.menu("Delete all bookmarks", true, s -> new AlertDialog.Builder(this).setMessage("Delete ALL bookmarks?")
+                .setPositiveButton("Delete", (dd, w) -> {
+                    Set<String> ids = new HashSet<>();
+                    for (JSONObject o : store.bookmarks()) ids.add(o.optString("id"));
+                    store.removeBookmarks(ids);
+                    refreshTopPage();
+                    updateChrome();
+                }).setNegativeButton("Cancel", null).show());
+        push(p);
+    }
+
+    private void editBookmark(final ListPage.Item it) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(20), dp(8), dp(20), dp(4));
+        final EditText name = UI.field(this, "Name", false);
+        name.setText(it.title);
+        final EditText url = UI.field(this, "Address", false);
+        url.setText(it.sub);
+        box.addView(name);
+        box.addView(UI.space(this, 1, 10));
+        box.addView(url);
+        new AlertDialog.Builder(this).setTitle("Edit bookmark").setView(box)
+                .setPositiveButton("Save", (dd, w) -> {
+                    String u = url.getText().toString().trim();
+                    if (!u.isEmpty() && !u.startsWith("https://") && !u.startsWith("http://")) u = "https://" + u;
+                    store.renameBookmark(it.id, name.getText().toString().trim(), u);
+                    refreshTopPage();
+                }).setNegativeButton("Cancel", null).show();
+    }
+
+    // ───────────────────────────── history ─────────────────────────────
+    private void addHistory(String title, String url) {
+        store.addHistory(title, url);
+    }
+
+    private String dayLabel(long ts) {
+        java.util.Calendar a = java.util.Calendar.getInstance(), b = java.util.Calendar.getInstance();
+        b.setTimeInMillis(ts);
+        int days = (int) ((startOfDay(a) - startOfDay(b)) / 86400000L);
+        if (days == 0) return "Today";
+        if (days == 1) return "Yesterday";
+        return android.text.format.DateFormat.format("EEEE, d MMMM yyyy", ts).toString();
+    }
+
+    private static long startOfDay(java.util.Calendar c) {
+        java.util.Calendar x = (java.util.Calendar) c.clone();
+        x.set(java.util.Calendar.HOUR_OF_DAY, 0); x.set(java.util.Calendar.MINUTE, 0); x.set(java.util.Calendar.SECOND, 0); x.set(java.util.Calendar.MILLISECOND, 0);
+        return x.getTimeInMillis();
+    }
+
+    private void showHistory() {
+        final java.text.DateFormat tf = android.text.format.DateFormat.getTimeFormat(this);
+        ListPage p = new ListPage(this, "History", () -> {
+            List<ListPage.Item> out = new ArrayList<>();
+            List<JSONObject> l = store.history();
+            for (int i = l.size() - 1; i >= 0; i--) {
+                JSONObject o = l.get(i);
+                ListPage.Item it = new ListPage.Item();
+                it.id = o.optString("id");
+                it.title = o.optString("t");
+                it.sub = o.optString("u");
+                long ts = o.optLong("ts");
+                it.section = dayLabel(ts);
+                it.trailing = tf.format(new Date(ts));
+                out.add(it);
+            }
+            return out;
+        }, it -> { open(it.sub, false); pop(); })
+                .empty("Your browsing history will show here", "history")
+                .bulk("Open in new tabs", "external", false, sel -> { for (ListPage.Item it : sel) newTab(it.sub, false, false); toast(sel.size() + " tabs opened"); })
+                .bulk("Bookmark", "star", false, sel -> { for (ListPage.Item it : sel) store.addBookmark(it.title, it.sub); toast("Bookmarked"); updateChrome(); })
+                .bulk("Delete", "trash", true, sel -> {
+                    Set<String> ids = new HashSet<>();
+                    for (ListPage.Item it : sel) ids.add(it.id);
+                    store.removeHistory(ids);
+                });
+        p.menu("Clear the last hour", false, s -> clearHistorySince(System.currentTimeMillis() - 3600000L));
+        p.menu("Clear today", false, s -> clearHistorySince(startOfDay(java.util.Calendar.getInstance())));
+        p.menu("Clear all history", true, s -> new AlertDialog.Builder(this).setMessage("Delete all browsing history?")
+                .setPositiveButton("Delete", (dd, w) -> { store.clearHistory(); refreshTopPage(); }).setNegativeButton("Cancel", null).show());
+        push(p);
+    }
+
+    private void clearHistorySince(long since) {
+        Set<String> ids = new HashSet<>();
+        for (JSONObject o : store.history()) if (o.optLong("ts") >= since) ids.add(o.optString("id"));
+        store.removeHistory(ids);
+        toast(ids.size() + " entries deleted");
+    }
+
+    // ───────────────────────────── downloads ─────────────────────────────
+    private void showDownloads() {
+        final DownloadManager dm = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
+        ListPage p = new ListPage(this, "Downloads", () -> downloadItems(dm), it -> {
+            Object[] tag = (Object[]) it.tag;
+            if ((Boolean) tag[1]) openDownload(dm, (Long) tag[0]); else toast(it.sub);
+        })
+                .empty("No downloads yet", "download")
+                .live(1000)
+                .bulk("Share", "share", false, sel -> {
+                    if (sel.size() > 1) { toast("Select one file to share"); return; }
+                    Object[] tag = (Object[]) sel.get(0).tag;
+                    if (!(Boolean) tag[1]) { toast("Not finished yet"); return; }
+                    try {
+                        Uri u = dm.getUriForDownloadedFile((Long) tag[0]);
+                        Intent i = new Intent(Intent.ACTION_SEND);
+                        i.setType(dm.getMimeTypeForDownloadedFile((Long) tag[0]));
+                        i.putExtra(Intent.EXTRA_STREAM, u);
+                        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                        startActivity(Intent.createChooser(i, "Share file"));
+                    } catch (Exception e) { toast("This file cannot be shared"); }
+                })
+                .bulk("Remove from list", "close", false, sel -> {
+                    Set<String> ids = new HashSet<>();
+                    for (ListPage.Item it : sel) ids.add(it.id);
+                    store.removeDownloads(ids);
+                })
+                .bulk("Delete file", "trash", true, sel -> {
+                    Set<String> ids = new HashSet<>();
+                    for (ListPage.Item it : sel) { ids.add(it.id); dm.remove((Long) ((Object[]) it.tag)[0]); }
+                    store.removeDownloads(ids);
+                    toast(sel.size() + " deleted");
+                });
+        p.menu("Open the Downloads app", false, s -> startActivity(new Intent(DownloadManager.ACTION_VIEW_DOWNLOADS)));
+        p.menu("Clear the list (keep the files)", false, s -> {
+            Set<String> ids = new HashSet<>();
+            for (JSONObject o : store.downloads()) ids.add(o.optString("id"));
+            store.removeDownloads(ids);
+        });
+        push(p);
+    }
+
+    private List<ListPage.Item> downloadItems(DownloadManager dm) {
+        List<ListPage.Item> out = new ArrayList<>();
+        List<JSONObject> l = store.downloads();
+        if (l.isEmpty()) return out;
+        long[] ids = new long[l.size()];
+        for (int i = 0; i < ids.length; i++) { try { ids[i] = Long.parseLong(l.get(i).optString("id")); } catch (Exception e) { ids[i] = -1; } }
+        java.util.HashMap<Long, long[]> info = new java.util.HashMap<>();      // id -> status, total, got
+        Cursor c = null;
+        try {
+            c = dm.query(new DownloadManager.Query().setFilterById(ids));
+            if (c != null) while (c.moveToNext()) {
+                long id = c.getLong(c.getColumnIndexOrThrow(DownloadManager.COLUMN_ID));
+                info.put(id, new long[]{c.getInt(c.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS)),
+                        c.getLong(c.getColumnIndexOrThrow(DownloadManager.COLUMN_TOTAL_SIZE_BYTES)),
+                        c.getLong(c.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR))});
+            }
+        } catch (Exception ignored) { } finally { if (c != null) c.close(); }
+        final java.text.DateFormat tf = android.text.format.DateFormat.getTimeFormat(this);
+        for (int i = l.size() - 1; i >= 0; i--) {
+            JSONObject o = l.get(i);
+            long id = ids[i];
+            long[] f = info.get(id);
+            ListPage.Item it = new ListPage.Item();
+            it.id = o.optString("id");
+            it.title = o.optString("n", "file");
+            boolean done = false;
+            String status;
+            if (f == null) status = "File removed";
+            else if (f[0] == DownloadManager.STATUS_SUCCESSFUL) { status = android.text.format.Formatter.formatShortFileSize(this, f[1]); done = true; }
+            else if (f[0] == DownloadManager.STATUS_FAILED) status = "Failed";
+            else if (f[0] == DownloadManager.STATUS_PAUSED) status = "Paused";
+            else {
+                it.progress = f[1] > 0 ? (int) (f[2] * 100 / f[1]) : 0;
+                status = f[1] > 0 ? it.progress + "%  •  " + android.text.format.Formatter.formatShortFileSize(this, f[2]) + " of " + android.text.format.Formatter.formatShortFileSize(this, f[1]) : "Downloading…";
+            }
+            String host = UI.hostOf(o.optString("u"));
+            it.sub = status + (host.isEmpty() ? "" : "  •  " + host);
+            it.trailing = tf.format(new Date(o.optLong("ts")));
+            it.warn = f != null && f[0] == DownloadManager.STATUS_FAILED;
+            String n = it.title.toLowerCase();
+            it.icon = n.matches(".*\\.(png|jpe?g|gif|webp|bmp|heic)$") ? "image" : "file";
+            it.color = UI.TEXT2;
+            it.section = dayLabel(o.optLong("ts"));
+            it.tag = new Object[]{id, done};
+            out.add(it);
+        }
+        return out;
+    }
+
+    private void openDownload(DownloadManager dm, long id) {
+        try {
+            Uri u = dm.getUriForDownloadedFile(id);
+            Intent i = new Intent(Intent.ACTION_VIEW);
+            i.setDataAndType(u, dm.getMimeTypeForDownloadedFile(id));
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivity(i);
+        } catch (Exception e) {
+            toast("No app can open this file");
+        }
+    }
+
+    private void clearAllDataNow() {
+        CookieManager.getInstance().removeAllCookies(null);
+        CookieManager.getInstance().flush();
+        WebStorage.getInstance().deleteAllData();
+        store.clearHistory();
+        prefs.edit().putString("session", "[]").apply();
+        for (BTab t : tabs) { t.web.clearCache(true); t.web.clearHistory(); t.web.clearFormData(); }
+    }
+
+    // ───────────────────────────── settings ─────────────────────────────
+    private interface BoolSet { void set(boolean v); }
+
+    private void settingSwitch(LinearLayout parent, String title, String desc, boolean value, final BoolSet set) {
+        LinearLayout r = new LinearLayout(this);
+        r.setGravity(Gravity.CENTER_VERTICAL);
+        r.setPadding(dp(18), dp(12), dp(14), dp(12));
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        col.addView(UI.text(this, title, 15, UI.TEXT, false));
+        if (desc != null) {
+            TextView dsc = UI.text(this, desc, 12, UI.TEXT2, false);
+            col.addView(dsc);
+        }
+        r.addView(col, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        final Switch sw = new Switch(this);
+        sw.setChecked(value);
+        sw.setThumbTintList(android.content.res.ColorStateList.valueOf(value ? UI.ACCENT : 0xFFFFFFFF));
+        sw.setOnCheckedChangeListener((b, v) -> {
+            sw.setThumbTintList(android.content.res.ColorStateList.valueOf(v ? UI.ACCENT : 0xFFFFFFFF));
+            set.set(v);
+        });
+        r.addView(sw);
+        r.setOnClickListener(v -> sw.toggle());
+        r.setBackground(UI.ripple(this, Color.TRANSPARENT, 0, 0));
+        parent.addView(r);
+    }
+
+    private void settingLink(LinearLayout parent, String icon, String title, String sub, final Runnable r) {
+        LinearLayout row = UI.row(this, icon, title, sub, UI.TEXT2);
+        row.setOnClickListener(v -> r.run());
+        parent.addView(row);
+    }
+
+    private void settingHeader(LinearLayout parent, String t) {
+        TextView h = UI.text(this, t, 13, UI.ACCENT, true);
+        h.setPadding(dp(18), dp(20), dp(18), dp(4));
+        parent.addView(h);
+    }
+
+    private void putBool(String key, boolean v) { prefs.edit().putBoolean(key, v).apply(); }
+
+    private void applyAllTabs() {
+        for (BTab t : tabs) applyTabSettings(t);
+        applySecure();
+    }
+
+    private void showSettings() {
+        final LinearLayout page = new LinearLayout(this);
+        page.setOrientation(LinearLayout.VERTICAL);
+        page.setBackgroundColor(UI.BG);
+        page.setClickable(true);
+        page.addView(Vault.topBar(this, "Settings"));
+        page.addView(UI.divider(this));
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        list.setPadding(0, 0, 0, dp(30));
+
+        settingHeader(list, "Privacy & security");
+        settingSwitch(list, "Block ads & trackers", "Hides known ad and tracking servers", adBlock, v -> { adBlock = v; putBool("adblock", v); });
+        settingSwitch(list, "Remove tracking from links", "Cleans utm_*, fbclid, gclid ... from addresses", stripLinks, v -> { stripLinks = v; putBool("striplinks", v); });
+        settingSwitch(list, "Allow third-party cookies", "Off is more private; some logins need it", thirdPartyCookies, v -> { thirdPartyCookies = v; putBool("thirdcookies", v); applyAllTabs(); });
+        settingSwitch(list, "Safe Browsing", "Warn about dangerous sites", safeBrowsing, v -> { safeBrowsing = v; putBool("safebrowsing", v); applyAllTabs(); });
+        settingSwitch(list, "JavaScript", "Turning it off breaks many sites", jsEnabled, v -> { jsEnabled = v; putBool("js", v); applyAllTabs(); });
+        settingSwitch(list, "Block screenshots", "Hides the app in the recent-apps list too (always on for private tabs)", blockShots, v -> { blockShots = v; putBool("blockshots", v); applySecure(); });
+        settingSwitch(list, "Lock the app with your screen lock", "Ask for PIN, pattern or fingerprint when the app is opened again", appLock, v -> {
+            KeyguardManager km = (KeyguardManager) getSystemService(Context.KEYGUARD_SERVICE);
+            if (v && (km == null || !km.isDeviceSecure())) { toast("Set a screen lock in the phone's Settings first"); appLock = false; putBool("applock", false); return; }
+            appLock = v; putBool("applock", v);
+        });
+        settingSwitch(list, "Save browsing history", null, saveHistory, v -> { saveHistory = v; putBool("savehistory", v); });
+        settingSwitch(list, "Clear all data when the app closes", null, clearOnExit, v -> { clearOnExit = v; putBool("clearonexit", v); });
+
+        settingHeader(list, "Downloads");
+        settingSwitch(list, "Ask before downloading", "Shows the file name and size first", askDownload, v -> { askDownload = v; putBool("askdownload", v); });
+        settingLink(list, "download", "Downloads", "Open the download manager", this::showDownloads);
+
+        settingHeader(list, "Passwords & autofill");
+        settingSwitch(list, "Offer to save passwords", "Asks after you sign in. Stored encrypted with a key that never leaves the phone", offerSave, v -> { offerSave = v; putBool("offersave", v); });
+        settingSwitch(list, "Offer to fill saved passwords", null, offerFill, v -> { offerFill = v; putBool("offerfill", v); });
+        settingSwitch(list, "Ask for screen lock first", "PIN, pattern or fingerprint before passwords are shown or filled", requireUnlock, v -> { requireUnlock = v; putBool("requireunlock", v); });
+        settingLink(list, "key", "Password manager", "Saved logins, generator, password check", () -> Vault.openList(this));
+        settingLink(list, "magic", "Autofill info", "Name, email, phone, address", () -> Vault.openAutofill(this));
+        settingLink(list, "trash", "Sites that never save passwords", neverSave.size() + " sites", this::manageNeverSave);
+
+        settingHeader(list, "Appearance & browsing");
+        settingSwitch(list, "Dark pages", "Forces a dark look on websites", darkMode, v -> { darkMode = v; putBool("dark", v); for (BTab t : tabs) applyDark(t.web.getSettings()); });
+        settingSwitch(list, "Request desktop sites by default", null, desktopDefault, v -> { desktopDefault = v; putBool("desktopdefault", v); });
+        settingLink(list, "search", "Search engine", ENGINE_NAMES[engine], this::chooseEngine);
+        settingLink(list, "reader", "Text size", TEXT_SIZES[textSizeIndex] + "%", this::cycleTextSize);
+        settingLink(list, "home", "Home page", homeUrl.isEmpty() ? "New tab page" : homeUrl, this::chooseHome);
+
+        settingHeader(list, "Data");
+        settingLink(list, "user", "Profiles", "Separate bookmarks, history, passwords and logins", this::showProfiles);
+        settingLink(list, "lock", "Site permissions", "Reset saved camera, microphone and location answers", this::resetSitePermissions);
+        settingLink(list, "trash", "Clear browsing data", null, this::clearData);
+        settingLink(list, "info", "About SPS Browser", null, this::showAbout);
+
+        ScrollView sv = new ScrollView(this);
+        sv.addView(list);
+        page.addView(sv, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        class SettingsPage extends LinearLayout implements Page {
+            SettingsPage(Context c) { super(c); }
+            @Override public boolean onBack() { return false; }
+        }
+        SettingsPage sp = new SettingsPage(this);
+        sp.setOrientation(LinearLayout.VERTICAL);
+        sp.addView(page, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        push(sp);
+    }
+
+    private void manageNeverSave() {
+        if (neverSave.isEmpty()) { toast("No sites in this list"); return; }
+        final String[] hosts = neverSave.toArray(new String[0]);
+        final boolean[] on = new boolean[hosts.length];
+        new AlertDialog.Builder(this).setTitle("Select sites to allow saving again")
+                .setMultiChoiceItems(hosts, on, (dd, which, checked) -> on[which] = checked)
+                .setPositiveButton("Allow", (dd, w) -> {
+                    for (int i = 0; i < hosts.length; i++) if (on[i]) neverSave.remove(hosts[i]);
+                    prefs.edit().putStringSet("neversave", new HashSet<>(neverSave)).apply();
+                }).setNegativeButton("Cancel", null).show();
+    }
+
+    // ───────────────────────────── profiles ─────────────────────────────
+    private static final int[] PROFILE_COLORS = {0xFF1A73E8, 0xFF188038, 0xFFE37400, 0xFFD93025, 0xFF9334E6, 0xFF129EAF, 0xFFC2185B, 0xFF5F6368};
+
+    private void showProfiles() {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(0, 0, 0, dp(14));
+        TextView title = UI.text(this, "Profiles", 18, UI.TEXT, true);
+        title.setPadding(dp(20), dp(10), dp(20), dp(4));
+        box.addView(title);
+        TextView note = UI.text(this, Profiles.separateCookies()
+                ? "Each profile has its own bookmarks, history, passwords and logged-in sites."
+                : "Each profile has its own bookmarks, history and passwords. On this Android version switching profile also signs you out of websites.", 12, UI.TEXT2, false);
+        note.setPadding(dp(20), 0, dp(20), dp(8));
+        box.addView(note);
+        final Dialog[] d = new Dialog[1];
+        for (final Profiles.Profile p : profiles.list()) {
+            boolean active = p.id.equals(profiles.activeId());
+            LinearLayout row = new LinearLayout(this);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(dp(18), dp(10), dp(8), dp(10));
+            row.setBackground(UI.ripple(this, active ? UI.ACCENT_BG : Color.TRANSPARENT, 0, 0));
+            row.addView(UI.avatar(this, p.name, p.color, 40));
+            LinearLayout col = new LinearLayout(this);
+            col.setOrientation(LinearLayout.VERTICAL);
+            col.setPadding(dp(14), 0, 0, 0);
+            col.addView(UI.oneLine(this, p.name, 16, UI.TEXT, true));
+            col.addView(UI.oneLine(this, active ? "In use" : "Tap to switch", 12, active ? UI.ACCENT : UI.TEXT2, false));
+            row.addView(col, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            ImageView edit = UI.icon(this, "edit", UI.TEXT2, 44, 11);
+            edit.setOnClickListener(v -> { d[0].dismiss(); editProfile(p); });
+            row.addView(edit);
+            row.setOnClickListener(v -> {
+                d[0].dismiss();
+                if (!active) confirmSwitch(p);
+            });
+            box.addView(row);
+        }
+        LinearLayout add = UI.row(this, "plus", "Add profile", null, UI.ACCENT);
+        add.setOnClickListener(v -> { d[0].dismiss(); editProfile(null); });
+        box.addView(add);
+        d[0] = UI.sheet(this, box);
+        d[0].show();
+    }
+
+    private void confirmSwitch(final Profiles.Profile p) {
+        new AlertDialog.Builder(this).setTitle("Switch to " + p.name + "?")
+                .setMessage("SPS Browser restarts so the profile\u2019s own data can be opened. Your open tabs are saved and come back when you return.")
+                .setPositiveButton("Switch", (dd, w) -> switchProfile(p.id))
+                .setNegativeButton("Cancel", null).show();
+    }
+
+    private void editProfile(final Profiles.Profile existing) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(20), dp(10), dp(20), dp(4));
+        final EditText name = UI.field(this, "Profile name", false);
+        if (existing != null) name.setText(existing.name);
+        box.addView(name);
+        final int[] color = {existing != null ? existing.color : PROFILE_COLORS[profiles.list().size() % PROFILE_COLORS.length]};
+        LinearLayout sw = new LinearLayout(this);
+        sw.setPadding(0, dp(14), 0, 0);
+        final List<View> dots = new ArrayList<>();
+        for (final int col : PROFILE_COLORS) {
+            View dot = new View(this);
+            dots.add(dot);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(30), dp(30));
+            lp.rightMargin = dp(8);
+            sw.addView(dot, lp);
+            final Runnable paint = () -> {
+                for (int i = 0; i < PROFILE_COLORS.length; i++)
+                    dots.get(i).setBackground(UI.box(this, PROFILE_COLORS[i], 15, PROFILE_COLORS[i] == color[0] ? UI.TEXT : 0));
+            };
+            dot.setOnClickListener(v -> { color[0] = col; paint.run(); });
+        }
+        box.addView(sw);
+        for (int i = 0; i < PROFILE_COLORS.length; i++)
+            dots.get(i).setBackground(UI.box(this, PROFILE_COLORS[i], 15, PROFILE_COLORS[i] == color[0] ? UI.TEXT : 0));
+        AlertDialog.Builder b = new AlertDialog.Builder(this).setTitle(existing == null ? "New profile" : "Edit profile").setView(box)
+                .setPositiveButton("Save", (dd, w) -> {
+                    String n = name.getText().toString().trim();
+                    if (n.isEmpty()) { toast("Enter a name"); return; }
+                    if (existing == null) {
+                        final Profiles.Profile np = profiles.add(n, color[0]);
+                        new AlertDialog.Builder(this).setMessage("Profile \u201C" + n + "\u201D created. Switch to it now?")
+                                .setPositiveButton("Switch", (d2, w2) -> switchProfile(np.id)).setNegativeButton("Later", null).show();
+                    } else {
+                        profiles.rename(existing.id, n, color[0]);
+                        if (existing.id.equals(profiles.activeId())) {
+                            profileAvatar.setText(n.substring(0, 1).toUpperCase());
+                            profileAvatar.setBackground(UI.box(this, color[0], 17, 0));
+                            android.graphics.drawable.GradientDrawable g = new android.graphics.drawable.GradientDrawable();
+                            g.setShape(android.graphics.drawable.GradientDrawable.OVAL);
+                            g.setColor(color[0]);
+                            profileAvatar.setBackground(g);
+                        }
+                    }
+                }).setNegativeButton("Cancel", null);
+        if (existing != null && !existing.id.equals("default")) {
+            b.setNeutralButton("Delete", (dd, w) -> new AlertDialog.Builder(this).setTitle("Delete " + existing.name + "?")
+                    .setMessage("Its bookmarks, history, passwords and logins are erased for good.")
+                    .setPositiveButton("Delete", (d2, w2) -> {
+                        boolean wasActive = existing.id.equals(profiles.activeId());
+                        profiles.delete(existing.id);
+                        toast("Profile deleted");
+                        if (wasActive) { switchingProfile = true; restartApp(); }
+                    }).setNegativeButton("Cancel", null).show());
+        }
+        b.show();
+    }
+
+    private void switchProfile(String id) {
+        saveSession();
+        switchingProfile = true;
+        if (!Profiles.separateCookies()) {                   // Android 8 and older cannot keep separate cookie jars: sign out instead of mixing profiles
+            CookieManager.getInstance().removeAllCookies(null);
+            CookieManager.getInstance().flush();
+        }
+        profiles.setActive(id);
+        restartApp();
+    }
+
+    private void restartApp() {
+        Intent i = getPackageManager().getLaunchIntentForPackage(getPackageName());
+        if (i != null) {
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+            startActivity(i);
+        }
+        finishAffinity();
+        ui.postDelayed(() -> android.os.Process.killProcess(android.os.Process.myPid()), 300);     // fresh process = the new profile's own WebView data
+    }
+
+    private void saveSession() {
+        try {
+            JSONArray saved = new JSONArray();
+            int index = 0;
+            for (BTab t : tabs) {
+                if (t.priv) continue;
+                if (t == current) index = saved.length();
+                JSONObject o = new JSONObject();
+                o.put("u", isNewTab(t.url) ? "" : t.url);
+                o.put("p", t.pinned);
+                saved.put(o);
+            }
+            prefs.edit().putString("session", saved.toString()).putInt("session_index", index).apply();
+        } catch (Exception ignored) { }
+    }
+
+    // ───────────────────────────── passwords and autofill ─────────────────────────────
+    private static final String HOOK_JS =
+            "(function(){if(window.__spsHook)return;window.__spsHook=true;"
+            + "function find(f){var pw=f.querySelector('input[type=password]');if(!pw||!pw.value)return null;"
+            + "var ins=[].slice.call(f.querySelectorAll('input'));var i=ins.indexOf(pw);var u='';"
+            + "for(var k=i-1;k>=0;k--){var t=(ins[k].type||'text').toLowerCase();if((t=='text'||t=='email'||t=='tel')&&ins[k].value){u=ins[k].value;break;}}"
+            + "return {u:u,p:pw.value};}"
+            + "function report(f){try{var r=find(f);if(r)SPSAF.save(location.hostname,r.u,r.p);}catch(e){}}"
+            + "document.addEventListener('submit',function(e){report(e.target);},true);"
+            + "document.addEventListener('click',function(e){var b=e.target.closest&&e.target.closest('button,input[type=submit],input[type=button],[role=button]');"
+            + "if(!b)return;var f=b.form||b.closest('form')||document.body;report(f);},true);"
+            + "document.addEventListener('keydown',function(e){if(e.key==='Enter'&&e.target&&e.target.type==='password'){report(e.target.form||document.body);}},true);"
+            + "})();";
+
+    /** Only the page can call save(); it can only ever propose saving, never read anything. The host is checked against the real address. */
+    private class AutofillBridge {
+        private final BTab tab;
+        AutofillBridge(BTab t) { tab = t; }
+
+        @JavascriptInterface
+        public void save(final String host, final String user, final String pass) {
+            runOnUiThread(() -> onLoginSubmitted(tab, host, user, pass));
+        }
+    }
+
+    private void afterPageLoad(final BTab tab, final WebView view) {
+        if (tab == current) updateChrome();
+        final String url = tab.url;
+        if (url == null || !url.startsWith("https://")) return;
+        if (offerSave && !tab.priv) view.evaluateJavascript(HOOK_JS, null);
+        if (offerFill && tab == current && store.isSecure()) {
+            final String host = UI.hostOf(url);
+            final List<JSONObject> logins = store.loginsFor(host);
+            if (logins.isEmpty()) return;
+            view.evaluateJavascript("(function(){var p=document.querySelector('input[type=password]');return !!p&&p.offsetParent!==null})()", v -> {
+                if ("true".equals(v) && tab == current && host.equals(UI.hostOf(tab.url))) offerFillBanner(host, logins);
+            });
+        }
+    }
+
+    private void onLoginSubmitted(BTab tab, String host, String user, String pass) {
+        if (!offerSave || tab.priv || tab != current || host == null || pass == null || user == null) return;
+        String url = tab.url;
+        if (url == null || !url.startsWith("https://")) return;
+        String real = UI.hostOf(url);
+        String h = host.toLowerCase();
+        if (h.startsWith("www.")) h = h.substring(4);
+        if (!h.equals(real)) return;                                      // a frame trying to speak for another site
+        if (pass.isEmpty() || pass.length() > 256 || user.length() > 256) return;
+        if (neverSave.contains(real) || !store.isSecure()) return;
+        if (store.samePassword(real, user, pass)) return;
+        long now = System.currentTimeMillis();
+        if (now - lastSaveOffer < 1500) return;
+        lastSaveOffer = now;
+        offerSaveBanner(real, user, pass, store.hasLogin(real, user));
+    }
+
+    private View banner(String icon, String title, String sub) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.HORIZONTAL);
+        card.setGravity(Gravity.CENTER_VERTICAL);
+        card.setPadding(dp(12), dp(10), dp(8), dp(10));
+        card.setBackground(UI.box(this, UI.BG, 14, UI.BORDER));
+        card.setElevation(dp(3));
+        ImageView ic = new ImageView(this);
+        ic.setImageDrawable(Ico.of(icon, UI.ACCENT));
+        int pad = dp(8);
+        ic.setPadding(pad, pad, pad, pad);
+        ic.setBackground(UI.box(this, UI.ACCENT_BG, 18, 0));
+        card.addView(ic, new LinearLayout.LayoutParams(dp(36), dp(36)));
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        col.setPadding(dp(12), 0, dp(6), 0);
+        col.addView(UI.oneLine(this, title, 14, UI.TEXT, true));
+        col.addView(UI.oneLine(this, sub, 12, UI.TEXT2, false));
+        card.addView(col, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        return card;
+    }
+
+    private TextView bannerButton(String label, boolean primary, View.OnClickListener l) {
+        TextView b = UI.text(this, label, 13, primary ? Color.WHITE : UI.ACCENT, true);
+        b.setGravity(Gravity.CENTER);
+        b.setPadding(dp(12), dp(8), dp(12), dp(8));
+        b.setBackground(UI.ripple(this, primary ? UI.ACCENT : Color.TRANSPARENT, 16, 0));
+        b.setOnClickListener(l);
+        return b;
+    }
+
+    private void showBanner(View v) {
+        bannerSlot.removeAllViews();
+        bannerSlot.addView(v);
+        bannerSlot.setVisibility(View.VISIBLE);
+        final View mine = v;
+        ui.postDelayed(() -> { if (bannerSlot.getChildCount() > 0 && bannerSlot.getChildAt(0) == mine) hideBanner(); }, 25000);
+    }
+
+    private void hideBanner() {
+        if (bannerSlot == null) return;
+        bannerSlot.removeAllViews();
+        bannerSlot.setVisibility(View.GONE);
+    }
+
+    private void offerSaveBanner(final String host, final String user, final String pass, boolean update) {
+        LinearLayout card = (LinearLayout) banner("key", update ? "Update saved password?" : "Save password?", (user.isEmpty() ? "(no username)" : user) + "  \u2022  " + host);
+        card.addView(bannerButton("Never", false, v -> {
+            neverSave.add(host);
+            prefs.edit().putStringSet("neversave", new HashSet<>(neverSave)).apply();
+            hideBanner();
+        }));
+        card.addView(bannerButton(update ? "Update" : "Save", true, v -> {
+            hideBanner();
+            if (store.saveLogin(null, host, user, pass, "")) toast(update ? "Password updated" : "Password saved (encrypted)");
+            else toast("This phone cannot encrypt passwords, so nothing was saved");
+        }));
+        showBanner(card);
+    }
+
+    private void offerFillBanner(final String host, final List<JSONObject> logins) {
+        String who = logins.get(0).optString("u");
+        LinearLayout card = (LinearLayout) banner("key", "Sign in to " + host, (who.isEmpty() ? "Saved password" : who) + (logins.size() > 1 ? "  +" + (logins.size() - 1) + " more" : ""));
+        card.addView(bannerButton("\u2715", false, v -> hideBanner()));
+        card.addView(bannerButton("Fill", true, v -> {
+            hideBanner();
+            if (logins.size() == 1) fillLogin(logins.get(0)); else chooseLogin(logins);
+        }));
+        showBanner(card);
+    }
+
+    private void chooseLogin(final List<JSONObject> logins) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(0, 0, 0, dp(14));
+        final Dialog[] d = new Dialog[1];
+        TextView t = UI.text(this, "Choose an account", 18, UI.TEXT, true);
+        t.setPadding(dp(20), dp(10), dp(20), dp(6));
+        box.addView(t);
+        for (final JSONObject o : logins) {
+            LinearLayout row = UI.row(this, "user", o.optString("u").isEmpty() ? "(no username)" : o.optString("u"), o.optString("h"), UI.TEXT2);
+            row.setOnClickListener(v -> { d[0].dismiss(); fillLogin(o); });
+            box.addView(row);
+        }
+        d[0] = UI.sheet(this, box);
+        d[0].show();
+    }
+
+    private void fillLogin(final JSONObject login) {
+        unlock(() -> {
+            if (current == null) return;
+            String js = "(function(u,p){function set(e,v){var s=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;s.call(e,v);"
+                    + "e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('change',{bubbles:true}));}"
+                    + "var pw=[].slice.call(document.querySelectorAll('input[type=password]')).filter(function(e){return e.offsetParent!==null;})[0];if(!pw)return 0;"
+                    + "var root=pw.form||document;var ins=[].slice.call(root.querySelectorAll('input'));var i=ins.indexOf(pw);var us=null;"
+                    + "for(var k=i-1;k>=0;k--){var t=(ins[k].type||'text').toLowerCase();if(t=='text'||t=='email'||t=='tel'){us=ins[k];break;}}"
+                    + "if(us&&u)set(us,u);set(pw,p);return 1;})(" + JSONObject.quote(login.optString("u")) + "," + JSONObject.quote(login.optString("p")) + ")";
+            current.web.evaluateJavascript(js, null);
+        });
+    }
+
+    /** "Fill form": puts the saved name / email / phone / address into the form on the page. */
+    private void fillAddress() {
+        final JSONObject a = store.autofill();
+        if (a.length() == 0) {
+            new AlertDialog.Builder(this).setMessage("Add your autofill info first (name, email, address ...).")
+                    .setPositiveButton("Add", (dd, w) -> Vault.openAutofill(this)).setNegativeButton("Cancel", null).show();
+            return;
+        }
+        unlock(() -> {
+            if (current == null) return;
+            String js = "(function(d){function key(e){return ((e.getAttribute('autocomplete')||'')+' '+(e.name||'')+' '+(e.id||'')+' '+(e.placeholder||'')+' '+(e.getAttribute('aria-label')||'')).toLowerCase();}"
+                    + "function set(e,v){if(!v||e.disabled||e.readOnly)return;"
+                    + "var P=e.tagName=='SELECT'?HTMLSelectElement.prototype:e.tagName=='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;var s=Object.getOwnPropertyDescriptor(P,'value');"
+                    + "if(e.tagName=='SELECT'){for(var i=0;i<e.options.length;i++){var o=e.options[i];if(o.text.toLowerCase()==v.toLowerCase()||o.value.toLowerCase()==v.toLowerCase()){s.set.call(e,o.value);break;}}}else s.set.call(e,v);"
+                    + "e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('change',{bubbles:true}));}"
+                    + "var parts=(d.name||'').split(' ');var first=parts[0]||'',last=parts.slice(1).join(' ');var n=0;"
+                    + "[].slice.call(document.querySelectorAll('input,select,textarea')).forEach(function(e){var t=(e.type||'').toLowerCase();"
+                    + "if(['password','hidden','checkbox','radio','submit','button','file'].indexOf(t)>=0)return;var k=key(e);if(/user(name)?|login|captcha|search/.test(k)&&!/e-?mail/.test(k))return;var v='';"
+                    + "if(/e-?mail/.test(k))v=d.email;else if(/tel|phone|mobile/.test(k))v=d.phone;else if(/zip|postal|postcode/.test(k))v=d.zip;"
+                    + "else if(/city|town|address-level2/.test(k))v=d.city;else if(/state|region|province|address-level1/.test(k))v=d.state;else if(/country/.test(k))v=d.country;"
+                    + "else if(/organi[sz]ation|company/.test(k))v=d.org;else if(/given-name|first/.test(k))v=first;else if(/family-name|last|surname/.test(k))v=last;"
+                    + "else if(/street|address-line1|address1|addr|address/.test(k))v=d.addr;else if(/name/.test(k))v=d.name;"
+                    + "if(v){set(e,v);n++;}});return n;})(" + a.toString() + ")";
+            current.web.evaluateJavascript(js, r -> toast("0".equals(r) || r == null ? "No matching fields found on this page" : "Form filled"));
+        });
+    }
+
+
+
+    // ───────────────────────────── privacy shield page ─────────────────────────────
+    private void showShield() {
+        if (current == null) return;
+        final String host = isNewTab(current.url) ? "" : UI.hostOf(current.url);
+        class ShieldPage extends LinearLayout implements Page {
+            ShieldPage(Context c) { super(c); }
+            @Override public boolean onBack() { return false; }
+        }
+        ShieldPage root2 = new ShieldPage(this);
+        root2.setOrientation(LinearLayout.VERTICAL);
+        root2.setBackgroundColor(UI.BG);
+        root2.setClickable(true);
+        root2.addView(Vault.topBar(this, "Privacy shield"));
+        root2.addView(UI.divider(this));
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        list.setPadding(0, 0, 0, dp(30));
+
+        LinearLayout hero = new LinearLayout(this);
+        hero.setOrientation(LinearLayout.VERTICAL);
+        hero.setGravity(Gravity.CENTER);
+        hero.setPadding(dp(20), dp(22), dp(20), dp(22));
+        hero.setBackground(UI.box(this, UI.ACCENT_BG, 18, 0));
+        ImageView sh = new ImageView(this);
+        sh.setImageDrawable(Ico.of("shield", UI.ACCENT));
+        hero.addView(sh, new LinearLayout.LayoutParams(dp(40), dp(40)));
+        TextView big = UI.text(this, String.valueOf(blockedCount.get()), 38, UI.ACCENT, true);
+        hero.addView(big);
+        hero.addView(UI.text(this, "trackers & ads blocked this session", 13, UI.TEXT2, false));
+        hero.addView(UI.text(this, (blockedTotal + blockedCount.get() - blockedSaved) + " in total", 12, UI.TEXT3, false));
+        LinearLayout.LayoutParams hp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        hp.setMargins(dp(16), dp(14), dp(16), dp(6));
+        list.addView(hero, hp);
+
+        if (!host.isEmpty()) {
+            settingHeader(list, "This site: " + host);
+            settingSwitch(list, "Shield on this site", shieldOff.contains(host) ? "Paused - ads and trackers are allowed here" : "Active", !shieldOff.contains(host), v -> {
+                if (v) shieldOff.remove(host); else shieldOff.add(host);
+                prefs.edit().putStringSet("shieldoff", new HashSet<>(shieldOff)).apply();
+                toast(v ? "Shield on" : "Shield paused for " + host);
+                if (current != null) current.web.reload();
+            });
+            boolean https = current.url != null && current.url.startsWith("https://");
+            TextView conn = UI.text(this, https ? "Connection is encrypted (https)" : "Connection is NOT encrypted", 13, https ? UI.OK : UI.DANGER, false);
+            conn.setPadding(dp(18), dp(4), dp(18), dp(8));
+            list.addView(conn);
+        }
+        settingHeader(list, "Protection");
+        settingSwitch(list, "Block ads & trackers", "Known ad and tracking servers (third-party only)", adBlock, v -> { adBlock = v; putBool("adblock", v); });
+        settingSwitch(list, "Remove tracking from links", "utm_*, fbclid, gclid ...", stripLinks, v -> { stripLinks = v; putBool("striplinks", v); });
+        settingSwitch(list, "Allow third-party cookies", "Off = websites cannot follow you across sites", thirdPartyCookies, v -> { thirdPartyCookies = v; putBool("thirdcookies", v); applyAllTabs(); });
+        settingSwitch(list, "Safe Browsing", "Warn about dangerous sites", safeBrowsing, v -> { safeBrowsing = v; putBool("safebrowsing", v); applyAllTabs(); });
+        settingSwitch(list, "Block screenshots", "Also hides the app in recent apps", blockShots, v -> { blockShots = v; putBool("blockshots", v); applySecure(); });
+        settingLink(list, "lock", "Sites with the shield paused", shieldOff.size() + " sites", this::manageShieldOff);
+        settingLink(list, "trash", "Clear browsing data", "Cookies, cache, history", this::clearData);
+        TextView note = UI.text(this, "Pages always load over https. Camera, microphone and location are only used after you allow them for a site.", 12, UI.TEXT2, false);
+        note.setPadding(dp(18), dp(16), dp(18), 0);
+        list.addView(note);
+        ScrollView sv = new ScrollView(this);
+        sv.addView(list);
+        root2.addView(sv, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        push(root2);
+    }
+
+    private void manageShieldOff() {
+        if (shieldOff.isEmpty()) { toast("No sites in this list"); return; }
+        final String[] hosts = shieldOff.toArray(new String[0]);
+        final boolean[] on = new boolean[hosts.length];
+        new AlertDialog.Builder(this).setTitle("Select sites to protect again")
+                .setMultiChoiceItems(hosts, on, (dd, which, checked) -> on[which] = checked)
+                .setPositiveButton("Protect", (dd, w) -> {
+                    for (int i = 0; i < hosts.length; i++) if (on[i]) shieldOff.remove(hosts[i]);
+                    prefs.edit().putStringSet("shieldoff", new HashSet<>(shieldOff)).apply();
+                }).setNegativeButton("Cancel", null).show();
+    }
+
+    // ───────────────────────────── app lock ─────────────────────────────
+    private void maybeLock() {
+        if (!appLock || lockOverlay != null) return;
+        KeyguardManager km = (KeyguardManager) getSystemService(Context.KEYGUARD_SERVICE);
+        if (km == null || !km.isDeviceSecure()) return;
+        boolean away = leftAt > 0 && System.currentTimeMillis() - leftAt > 30000;
+        if (!lockPending && !away) return;
+        lockPending = true;
+        FrameLayout o = new FrameLayout(this);
+        o.setBackgroundColor(UI.BG);
+        o.setClickable(true);
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        col.setGravity(Gravity.CENTER);
+        ImageView ic = new ImageView(this);
+        ic.setImageDrawable(Ico.of("lock", UI.ACCENT));
+        col.addView(ic, new LinearLayout.LayoutParams(dp(56), dp(56)));
+        TextView t = UI.text(this, "SPS Browser is locked", 20, UI.TEXT, true);
+        t.setPadding(0, dp(14), 0, dp(18));
+        col.addView(t);
+        TextView b = UI.button(this, "Unlock", true);
+        b.setOnClickListener(v -> askAppUnlock());
+        col.addView(b);
+        o.addView(col, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER));
+        lockOverlay = o;
+        root.addView(o, UI.match());
+        getWindow().setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE);
+        askAppUnlock();
+    }
+
+    @SuppressWarnings("deprecation")
+    private void askAppUnlock() {
+        KeyguardManager km = (KeyguardManager) getSystemService(Context.KEYGUARD_SERVICE);
+        if (km == null) { removeLock(); return; }
+        Intent i = km.createConfirmDeviceCredentialIntent("SPS Browser", "Unlock SPS Browser");
+        if (i == null) { removeLock(); return; }
+        try { startActivityForResult(i, REQ_APPLOCK); } catch (Exception e) { removeLock(); }
+    }
+
+    private void removeLock() {
+        if (lockOverlay != null) { root.removeView(lockOverlay); lockOverlay = null; }
+        lockPending = false;
+        applySecure();
+    }
+
     // ───────────────────────────── life cycle ─────────────────────────────
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        if (requestCode == FILE_CHOOSER && filePathCallback != null) {
-            filePathCallback.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(resultCode, data));
-            filePathCallback = null;
+        if (requestCode == REQ_AUTH) {
+            Runnable r = pendingUnlock;
+            pendingUnlock = null;
+            if (resultCode == RESULT_OK) { unlockedAt = System.currentTimeMillis(); if (r != null) r.run(); }
+            else toast("Screen lock not confirmed");
+            return;
+        }
+        if (requestCode == REQ_APPLOCK) {
+            if (resultCode == RESULT_OK) { lockPending = false; unlockedAt = System.currentTimeMillis(); removeLock(); }
+            return;
+        }
+        if (requestCode == FILE_CHOOSER) {
+            onFileChosen(resultCode, data);
             return;
         }
         if (requestCode == REQ_VOICE && resultCode == RESULT_OK && data != null) {
@@ -1324,6 +2357,12 @@ public class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
+        if (!pages.isEmpty()) {
+            View top = pages.get(pages.size() - 1);
+            if (top instanceof Page && ((Page) top).onBack()) return;
+            pop();
+            return;
+        }
         if (customView != null) {
             hideCustomViewNow();
         } else if (findBar.getVisibility() == View.VISIBLE) {
@@ -1340,30 +2379,27 @@ public class MainActivity extends Activity {
     @Override
     protected void onPause() {
         super.onPause();
-        try {                                                   // remember the open (non-private) tabs
-            JSONArray saved = new JSONArray();
-            int index = 0;
-            for (Tab t : tabs) {
-                if (t.priv) continue;
-                if (t == current) index = saved.length();
-                saved.put(isNewTab(t.url) ? "" : t.url);
-            }
-            prefs.edit().putString("session", saved.toString()).putInt("session_index", index).apply();
-        } catch (Exception ignored) { }
-        for (Tab t : tabs) t.web.onPause();
+        unlockedAt = 0;                                         // saved passwords lock again when the app goes to the background
+        leftAt = System.currentTimeMillis();
+        long delta = blockedCount.get() - blockedSaved;
+        if (delta > 0) { blockedTotal += delta; blockedSaved = blockedCount.get(); prefs.edit().putLong("blocked_total", blockedTotal).apply(); }
+        for (BTab t : tabs) captureThumb(t == current ? t : null);
+        saveSession();
+        for (BTab t : tabs) t.web.onPause();
         CookieManager.getInstance().flush();
     }
 
     @Override
     protected void onResume() {
         super.onResume();
-        for (Tab t : tabs) t.web.onResume();
+        maybeLock();
+        for (BTab t : tabs) t.web.onResume();
     }
 
     @Override
     protected void onDestroy() {
-        if (clearOnExit && isFinishing()) clearAllDataNow();
-        for (Tab t : new ArrayList<>(tabs)) {
+        if (clearOnExit && isFinishing() && !switchingProfile) clearAllDataNow();
+        for (BTab t : new ArrayList<>(tabs)) {
             webHolder.removeView(t.web);
             t.web.destroy();
         }
