@@ -40,3 +40,10 @@ Classic white design with a desktop-style toolbar (profile, address bar with loc
 - **Profiles:** separate settings, bookmarks, history, passwords and (Android 9+) logins per profile.
 - **Passwords & autofill:** save/fill prompts, password generator (random or words), strength and reuse check, address autofill. Everything is encrypted with an Android Keystore key (AES-256-GCM); the screen lock (PIN/pattern/fingerprint) is required before passwords are shown or filled; the screen is protected from screenshots on those pages; copied passwords are cleared from the clipboard after 30 seconds.
 - Settings page, print (whole page and selected area), voice search, reader mode, translate, desktop site, dark pages, ad & tracker blocking.
+
+## Android app: what is inside (v38)
+* **Home-screen widget** "SPS search": long-press the home screen -> Widgets -> SPS Browser. Search bar, microphone (voice search) and camera (Lens).
+* **Search with Lens**: camera or a photo from the gallery is uploaded to Google Lens; long-press any image on a page for "Search this image with Lens".
+* **Page tools**: screenshot (Pictures/SPS Browser), page information (certificate), view source, copy page text, open link from clipboard.
+* **Extension store**, **Privacy shield**, **app lock**, **Site permissions**, **Read aloud**, **Add to home screen**, **Thought of the day**.
+* **App updates**: checks the GitHub release of this project (needs the permanent signing key, see GITHUB_SETUP.md), verifies SHA-256, asks before installing.
