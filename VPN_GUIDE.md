@@ -21,3 +21,8 @@ Never use random "free proxy list" servers: the operator can read and change you
    - Your own server (PiVPN / wg-easy on a cheap VPS), or Mullvad / IVPN / any provider that offers WireGuard files.
 3. **+ WireGuard file...** or **+ Paste config**, select it, press **Protect WHOLE computer**, approve the administrator prompt.
 4. Undo with **Stop whole-computer VPN**.
+
+## "wireproxy was not found" - fixed in v39
+* The build (`python tools/ci_build.py`, GitHub Actions) now downloads wireproxy (and the WireGuard installer on Windows) and **stops with an error if it cannot** - no release can be made without them.
+  (wireproxy's repository moved to `windtf/wireproxy`; the old address is still tried as a fallback.)
+* If a copy of the program still has no helper, pressing **Connect** downloads it once from the official release into your profile folder (`vpn/bin`) and starts the tunnel. Internet is needed for that one time.

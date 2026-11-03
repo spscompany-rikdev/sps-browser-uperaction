@@ -47,3 +47,12 @@ Classic white design with a desktop-style toolbar (profile, address bar with loc
 * **Page tools**: screenshot (Pictures/SPS Browser), page information (certificate), view source, copy page text, open link from clipboard.
 * **Extension store**, **Privacy shield**, **app lock**, **Site permissions**, **Read aloud**, **Add to home screen**, **Thought of the day**.
 * **App updates**: checks the GitHub release of this project (needs the permanent signing key, see GITHUB_SETUP.md), verifies SHA-256, asks before installing.
+
+## v39 changes
+* YouTube: Brave-style ad shield (ad schedule removed from the player data, ad boxes hidden, ad endpoints blocked) on desktop **and** Android. One shared script: `android/app/src/main/assets/yt_shield.js`.
+* VPN: helper programs (wireproxy, Tor, WireGuard installer) are fetched at build time (build fails if missing) and, if still absent, downloaded on first Connect.
+* Print: "Selected area" works on desktop (non-blocking window, save/copy picture) and on Android (PixelCopy capture, print / save picture / share).
+* Guest window shows the real private New Tab page. New desktop Quick panel (⚡ button, Ctrl+Shift+Space) - a rounded drop-down for protection switches, tools, history and bookmarks.
+* Android: cookie-banner hiding, page tools (print, print area, share), safer screenshots.
+* Drop-down windows (desktop): `src/sps_dropdown.py` - dialogs open as a rounded drop-down under the toolbar (VPN, downloads, passwords, notes, extensions ...). Settings, updates, print, the big managers, message boxes and file pickers stay normal windows. Switch: Settings > "Drop-down windows".
+* Android: all dialogs use rounded cards with a grow-from-top-right animation (`SpsDialog` style).
