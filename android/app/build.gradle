@@ -18,6 +18,8 @@ android {
         targetSdk 34
         versionCode code
         versionName appVersion
+        // the GitHub project the in-app updater looks at (set automatically by the build; empty on local builds)
+        resValue "string", "update_repo", System.getenv("GITHUB_REPOSITORY") ?: ""
     }
 
     signingConfigs {

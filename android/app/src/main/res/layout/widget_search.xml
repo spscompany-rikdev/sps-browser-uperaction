@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:gravity="center_vertical"
+    android:orientation="horizontal"
+    android:padding="6dp">
+
+    <LinearLayout
+        android:id="@+id/w_pill"
+        android:layout_width="match_parent"
+        android:layout_height="48dp"
+        android:background="@drawable/widget_pill"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="14dp"
+        android:paddingEnd="6dp">
+
+        <ImageView
+            android:id="@+id/w_search"
+            android:layout_width="22dp"
+            android:layout_height="22dp"
+            android:contentDescription="Search"
+            android:src="@drawable/ic_w_search" />
+
+        <TextView
+            android:id="@+id/w_text"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:paddingStart="12dp"
+            android:singleLine="true"
+            android:text="Search or type a web address"
+            android:textColor="#5F6368"
+            android:textSize="15sp" />
+
+        <ImageView
+            android:id="@+id/w_mic"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:contentDescription="Voice search"
+            android:padding="9dp"
+            android:src="@drawable/ic_w_mic" />
+
+        <ImageView
+            android:id="@+id/w_lens"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:contentDescription="Search with camera"
+            android:padding="9dp"
+            android:src="@drawable/ic_w_camera" />
+    </LinearLayout>
+</LinearLayout>

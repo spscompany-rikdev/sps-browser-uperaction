@@ -24,6 +24,7 @@ import android.content.pm.PackageManager;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.net.Uri;
@@ -133,14 +134,20 @@ public class MainActivity extends Activity implements Host {
     private final Handler ui = new Handler(Looper.getMainLooper());
     private static final int REQ_AUTH = 4713;
     private static final int REQ_APPLOCK = 4714;
+    private static final int REQ_LENS = 4716, REQ_LENS_PERM = 4717;
+    private Uri lensCamera;
     private static final int REQ_CAMERA_PERM = 4715;
     private boolean stripLinks = true, appLock = false, askDownload = false, dailyQuote = true;
     private int quoteIndex;
+    private boolean autoUpdate = true;
+    private long downloadingUpdate = -1;
+    private final Set<String> extOn = new HashSet<>(), extSiteOff = new HashSet<>();
+    private JSONArray userScripts = new JSONArray();
+    private boolean noAutoplay, noPopups, keepAwake;
     private final Set<String> shieldOff = new HashSet<>();
     private long blockedTotal, blockedSaved, leftAt;
     private View lockOverlay;
     private boolean lockPending;
-    private WebChromeClient.FileChooserParams pendingChooser;
     private Uri cameraOutput;
 
     private FrameLayout root;
@@ -179,9 +186,17 @@ public class MainActivity extends Activity implements Host {
         appLock = prefs.getBoolean("applock", false);
         askDownload = prefs.getBoolean("askdownload", false);
         dailyQuote = prefs.getBoolean("dailyquote", true);
+        autoUpdate = prefs.getBoolean("autoupdate", true);
+        extOn.addAll(prefs.getStringSet("ext_on", new HashSet<String>()));
+        extSiteOff.addAll(prefs.getStringSet("ext_siteoff", new HashSet<String>()));
+        try { userScripts = new JSONArray(prefs.getString("ext_user", "[]")); } catch (Exception e) { userScripts = new JSONArray(); }
+        noAutoplay = prefs.getBoolean("noautoplay", false);
+        noPopups = prefs.getBoolean("nopopups", true);
+        keepAwake = prefs.getBoolean("keepawake", false);
         blockedTotal = prefs.getLong("blocked_total", 0);
         shieldOff.addAll(prefs.getStringSet("shieldoff", new HashSet<String>()));
         lockPending = appLock;
+        applyKeepAwake();
         neverSave.addAll(prefs.getStringSet("neversave", new HashSet<String>()));
         homeUrl = prefs.getString("home", "");
         engine = Math.max(0, Math.min(ENGINE_URLS.length - 1, prefs.getInt("engine", 0)));
@@ -205,6 +220,8 @@ public class MainActivity extends Activity implements Host {
         if (data != null) newTab(data.toString(), false, true);
         else if (!any) newTab(null, false, true);
         else switchTo(tabs.get(Math.min(prefs.getInt("session_index", 0), tabs.size() - 1)));
+        final Intent first = getIntent();
+        if (first != null && first.getStringExtra(SearchWidget.CMD) != null) ui.postDelayed(() -> handleCommand(first), 400);
     }
 
     private void buildUi() {
@@ -254,6 +271,9 @@ public class MainActivity extends Activity implements Host {
         ImageView micIcon = UI.icon(this, "mic", UI.TEXT2, 38, 9);
         micIcon.setOnClickListener(v -> voiceSearch());
         pill.addView(micIcon);
+        ImageView lensIcon = UI.icon(this, "image", UI.TEXT2, 38, 9);
+        lensIcon.setOnClickListener(v -> startLens());
+        pill.addView(lensIcon);
         bar.addView(pill, new LinearLayout.LayoutParams(0, dp(44), 1f));
         reloadIcon = UI.icon(this, "reload", UI.TEXT, 44, 11);
         reloadIcon.setOnClickListener(v -> {
@@ -430,6 +450,11 @@ public class MainActivity extends Activity implements Host {
     }
 
     /** Private tabs (and the "Block screenshots" setting) switch on FLAG_SECURE: no screenshots, hidden in the app switcher. */
+    private void applyKeepAwake() {
+        if (keepAwake) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+    }
+
     private void applySecure() {
         boolean secureOpen = false;
         for (View p : pages) if ("secure".equals(p.getTag())) secureOpen = true;
@@ -444,6 +469,8 @@ public class MainActivity extends Activity implements Host {
         if (Build.VERSION.SDK_INT >= 26) ws.setSafeBrowsingEnabled(safeBrowsing);
         CookieManager.getInstance().setAcceptThirdPartyCookies(t.web, thirdPartyCookies);
         ws.setTextZoom(TEXT_SIZES[textSizeIndex]);
+        ws.setMediaPlaybackRequiresUserGesture(noAutoplay);
+        ws.setSupportMultipleWindows(!noPopups);
         applyDark(ws);
     }
 
@@ -882,6 +909,7 @@ public class MainActivity extends Activity implements Host {
         } else if (type == WebView.HitTestResult.IMAGE_TYPE || type == WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE) {
             labels.add("Open image in new tab"); acts.add(() -> newTab(extra, false, true));
             labels.add("Download image"); acts.add(() -> startDownload(extra, tab.mobileUa, null, null));
+            labels.add("Search this image with Lens"); acts.add(() -> newTab(Lens.byUrl(extra), false, true));
             labels.add("Copy image address"); acts.add(() -> copyText(extra));
         } else {
             return false;
@@ -900,20 +928,23 @@ public class MainActivity extends Activity implements Host {
         final String origin = request.getOrigin() == null ? "this site" : request.getOrigin().toString();
         ArrayList<String> allowed = new ArrayList<>();
         ArrayList<String> androidPerms = new ArrayList<>();
-        boolean cam = false, mic = false;
+        boolean cam = false, mic = false, drm = false, midi = false;
         for (String res : request.getResources()) {
             if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(res)) { cam = true; allowed.add(res); androidPerms.add(android.Manifest.permission.CAMERA); }
             else if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(res)) { mic = true; allowed.add(res); androidPerms.add(android.Manifest.permission.RECORD_AUDIO); }
-            // anything else (protected media id, MIDI) is refused
+            else if (PermissionRequest.RESOURCE_PROTECTED_MEDIA_ID.equals(res)) { drm = true; allowed.add(res); }
+            else if (PermissionRequest.RESOURCE_MIDI_SYSEX.equals(res)) { midi = true; allowed.add(res); }
         }
         if (allowed.isEmpty()) { request.deny(); return; }
-        final String kind = (cam ? "camera" : "") + (cam && mic ? "+" : "") + (mic ? "microphone" : "");
+        ArrayList<String> kinds = new ArrayList<>();
+        if (cam) kinds.add("camera"); if (mic) kinds.add("microphone"); if (drm) kinds.add("protected content (DRM)"); if (midi) kinds.add("MIDI devices");
+        final String kind = android.text.TextUtils.join("+", kinds);
         final String[] res = allowed.toArray(new String[0]);
         final String[] perms = androidPerms.toArray(new String[0]);
         String saved = tab.priv ? "" : prefs.getString(permKey(origin, kind), "");
         if (saved.equals("deny")) { request.deny(); return; }
         if (saved.equals("allow")) { grantWithAndroidPermission(request, res, perms); return; }
-        askSitePermission("Allow " + origin + " to use your " + kind.replace("+", " and ") + "?", !tab.priv, new SiteAnswer() {
+        askSitePermission("Allow " + origin + " to use " + (cam || mic ? "your " : "") + kind.replace("+", " and ") + "?", !tab.priv, new SiteAnswer() {
             @Override public void answer(boolean allow, boolean remember) {
                 if (remember) prefs.edit().putString(permKey(origin, kind), allow ? "allow" : "deny").apply();
                 if (allow) grantWithAndroidPermission(request, res, perms); else request.deny();
@@ -972,10 +1003,17 @@ public class MainActivity extends Activity implements Host {
 
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        if (requestCode == REQ_LENS_PERM) {
+            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) lensCapture();
+            else toast("Camera permission is needed to search with the camera");
+            return;
+        }
         if (requestCode == REQ_CAMERA_PERM) {
-            WebChromeClient.FileChooserParams p = pendingChooser;
-            pendingChooser = null;
-            if (p != null && filePathCallback != null) launchFileChooser(p, false);     // with or without the camera
+            String k = pendingKind;
+            pendingKind = null;
+            boolean ok = grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+            if (k != null && ok && filePathCallback != null) pickSource(k);
+            else { finishFileChooser(null); toast("Camera permission is needed to take a photo or video"); }
             return;
         }
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
@@ -1281,46 +1319,74 @@ public class MainActivity extends Activity implements Host {
         return out.toArray(new String[0]);
     }
 
-    /** Opens the system file / photo picker. When the page asks for a camera capture, the camera permission is requested first. */
-    private void launchFileChooser(WebChromeClient.FileChooserParams params, boolean mayAskPermission) {
-        String[] types = acceptTypes(params);
-        boolean wantImage = false, wantVideo = false;
-        for (String t : types) { if (t.startsWith("image/") || t.equals("*/*")) wantImage |= !t.equals("*/*") || params.isCaptureEnabled(); if (t.startsWith("video/")) wantVideo = true; }
-        boolean capture = params.isCaptureEnabled() && (wantImage || wantVideo);
-        boolean camOk = checkSelfPermission(android.Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED;
-        if (capture && !camOk && mayAskPermission) {
-            pendingChooser = params;
-            requestPermissions(new String[]{android.Manifest.permission.CAMERA}, REQ_CAMERA_PERM);
-            return;
-        }
+    private String pendingKind;
+
+    /** Asks WHERE the file should come from (files, photos, videos, camera ...) - like other browsers - then opens that picker. */
+    private void launchFileChooser(final WebChromeClient.FileChooserParams params, boolean unused) {
+        final String[] types = acceptTypes(params);
+        boolean any = false, img = false, vid = false;
+        for (String t : types) { if (t.equals("*/*")) any = true; if (t.startsWith("image/")) img = true; if (t.startsWith("video/")) vid = true; }
+        final boolean multi = params.getMode() == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE;
+        final boolean wantImg = any || img, wantVid = any || vid;
+        chooserTypes = types; chooserMulti = multi;
+        if (params.isCaptureEnabled() && (img || vid)) { pickSource(img ? "photo" : "video"); return; }
+        final ArrayList<String> labels = new ArrayList<>(), kinds = new ArrayList<>();
+        labels.add("Files"); kinds.add("files");
+        if (wantImg) { labels.add("Photos & gallery"); kinds.add("photos"); }
+        if (wantVid && !wantImg) { labels.add("Videos"); kinds.add("videos"); }
+        if (wantImg) { labels.add("Take a photo"); kinds.add("photo"); }
+        if (wantVid) { labels.add("Record a video"); kinds.add("video"); }
+        String site = current == null ? "" : UI.hostOf(current.url);
+        new AlertDialog.Builder(this).setTitle(site.isEmpty() ? "Choose a file to upload" : site + " asks for a file")
+                .setItems(labels.toArray(new String[0]), (d, which) -> pickSource(kinds.get(which)))
+                .setOnCancelListener(d -> finishFileChooser(null))
+                .setNegativeButton("Cancel", (d, w) -> finishFileChooser(null)).show();
+    }
+
+    private String[] chooserTypes = {"*/*"};
+    private boolean chooserMulti;
+
+    private void pickSource(String kind) {
         cameraOutput = null;
-        Intent pick = new Intent(Intent.ACTION_GET_CONTENT);
-        pick.addCategory(Intent.CATEGORY_OPENABLE);
-        if (types.length == 1) pick.setType(types[0]);
-        else { pick.setType("*/*"); pick.putExtra(Intent.EXTRA_MIME_TYPES, types); }
-        if (params.getMode() == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE) pick.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
-        Intent chooser = Intent.createChooser(pick, "Choose a file");
-        if (camOk && (capture || wantImage)) {
-            try {
-                android.content.ContentValues cv = new android.content.ContentValues();
-                cv.put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, "SPS_" + System.currentTimeMillis() + ".jpg");
-                cv.put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/jpeg");
-                Uri out = getContentResolver().insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv);
-                if (out != null) {
+        Intent it;
+        if (kind.equals("photo") || kind.equals("video")) {
+            if (checkSelfPermission(android.Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                pendingKind = kind;
+                requestPermissions(new String[]{android.Manifest.permission.CAMERA}, REQ_CAMERA_PERM);
+                return;
+            }
+            if (kind.equals("photo")) {
+                try {
+                    android.content.ContentValues cv = new android.content.ContentValues();
+                    cv.put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, "SPS_" + System.currentTimeMillis() + ".jpg");
+                    cv.put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/jpeg");
+                    Uri out = getContentResolver().insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv);
+                    if (out == null) throw new IllegalStateException("no output");
                     cameraOutput = out;
-                    Intent cam = new Intent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE);
-                    cam.putExtra(android.provider.MediaStore.EXTRA_OUTPUT, out);
-                    cam.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION);
-                    if (capture) { pick = cam; chooser = cam; }
-                    else chooser.putExtra(Intent.EXTRA_INITIAL_INTENTS, new Intent[]{cam});
-                }
-            } catch (Exception ignored) { cameraOutput = null; }
+                    it = new Intent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE);
+                    it.putExtra(android.provider.MediaStore.EXTRA_OUTPUT, out);
+                    it.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                } catch (Exception e) { finishFileChooser(null); toast("Camera is not available"); return; }
+            } else {
+                it = new Intent(android.provider.MediaStore.ACTION_VIDEO_CAPTURE);
+            }
+        } else if (kind.equals("photos") || kind.equals("videos")) {
+            it = new Intent(Intent.ACTION_GET_CONTENT);
+            it.addCategory(Intent.CATEGORY_OPENABLE);
+            it.setType(kind.equals("photos") ? "image/*" : "video/*");
+            if (chooserMulti) it.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+        } else {                                                        // "files": the real file browser (Downloads, Documents, drives ...)
+            it = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            it.addCategory(Intent.CATEGORY_OPENABLE);
+            it.setType("*/*");
+            if (!(chooserTypes.length == 1 && chooserTypes[0].equals("*/*"))) it.putExtra(Intent.EXTRA_MIME_TYPES, chooserTypes);
+            if (chooserMulti) it.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
         }
         try {
-            startActivityForResult(chooser, FILE_CHOOSER);
+            startActivityForResult(it, FILE_CHOOSER);
         } catch (Exception e) {
             finishFileChooser(null);
-            toast("No app can pick files on this phone");
+            toast("No app can do that on this phone");
         }
     }
 
@@ -1497,6 +1563,8 @@ public class MainActivity extends Activity implements Host {
             menuRow(box, d, "print", "Print selected area", "Drag a box around the part to print", this::printSelectedArea);
             menuRow(box, d, "copy", "Copy link", null, this::copyLink);
             menuRow(box, d, "external", "Open in another browser", null, this::openExternal);
+            menuRow(box, d, "mic", tts != null && ttsSpeaking ? "Stop reading" : "Read aloud", null, this::readAloud);
+            menuRow(box, d, "home", "Add to home screen", null, this::addToHomeScreen);
         }
         menuRow(box, d, current.desktop ? "phone" : "desktop", current.desktop ? "Mobile site" : "Desktop site", null, this::toggleDesktop);
         menuRow(box, d, "dark", "Dark pages", darkMode ? "On" : "Off", () -> {
@@ -1504,15 +1572,16 @@ public class MainActivity extends Activity implements Host {
             for (BTab t : tabs) applyDark(t.web.getSettings());
             current.web.reload();
         });
-        menuRow(box, d, "shield", "Ad & tracker blocking", adBlock ? "On  •  " + blockedCount.get() + " blocked this session" : "Off", () -> {
-            adBlock = !adBlock; prefs.edit().putBoolean("adblock", adBlock).apply();
-            toast(adBlock ? "Ad & tracker blocking on" : "Ad & tracker blocking off");
-            current.web.reload();
-        });
+        menuRow(box, d, "shield", "Privacy shield", adBlock ? blockedCount.get() + " trackers blocked this session" : "Off", this::showShield);
+        menuRow(box, d, "magic", "Extension store", extOn.size() + " added", this::showExtensions);
         menuRow(box, d, "mic", "Voice search", null, this::voiceSearch);
+        menuRow(box, d, "image", "Search with Lens", "Camera or a photo", this::startLens);
+        menuRow(box, d, "sliders", "Page tools", "Screenshot, source, page info ...", this::showTools);
+        menuRow(box, d, "bookmark", "Thought of the day", "Words from great people", () -> showQuote(false));
         box.addView(UI.divider(this));
         menuRow(box, d, "settings", "Settings", null, this::showSettings);
         menuRow(box, d, "trash", "Clear browsing data", null, this::clearData);
+        menuRow(box, d, "refresh", "Check for updates", "Version " + myVersion(), () -> checkForUpdate(true));
         menuRow(box, d, "info", "About SPS Browser", null, this::showAbout);
         d[0] = UI.sheet(this, box);
         d[0].show();
@@ -1833,6 +1902,15 @@ public class MainActivity extends Activity implements Host {
         settingSwitch(list, "Clear all data when the app closes", null, clearOnExit, v -> { clearOnExit = v; putBool("clearonexit", v); });
 
         settingSwitch(list, "Thought of the day", "A short saying from a great person once a day", dailyQuote, v -> { dailyQuote = v; putBool("dailyquote", v); });
+        settingLink(list, "lock", "Site permissions", "Reset what sites may use", this::manageSitePermissions);
+        settingHeader(list, "Pages");
+        settingLink(list, "magic", "Extension store", "Add-ons, your own scripts", this::showExtensions);
+        settingSwitch(list, "Block autoplay", "Videos start only when you tap play", noAutoplay, v -> { noAutoplay = v; putBool("noautoplay", v); applyAllTabs(); });
+        settingSwitch(list, "Block pop-up windows", "Pages cannot open extra windows by themselves", noPopups, v -> { noPopups = v; putBool("nopopups", v); applyAllTabs(); });
+        settingSwitch(list, "Keep screen on while browsing", null, keepAwake, v -> { keepAwake = v; putBool("keepawake", v); applyKeepAwake(); });
+        settingHeader(list, "App updates");
+        settingSwitch(list, "Check for updates automatically", "At most every 12 hours; nothing is installed without your OK", autoUpdate, v -> { autoUpdate = v; putBool("autoupdate", v); });
+        settingLink(list, "refresh", "Check for updates now", "Version " + myVersion(), () -> checkForUpdate(true));
         settingHeader(list, "Downloads");
         settingSwitch(list, "Ask before downloading", "Shows the file name and size first", askDownload, v -> { askDownload = v; putBool("askdownload", v); });
         settingLink(list, "download", "Downloads", "Open the download manager", this::showDownloads);
@@ -2006,13 +2084,14 @@ public class MainActivity extends Activity implements Host {
     }
 
     private void restartApp() {
-        Intent i = getPackageManager().getLaunchIntentForPackage(getPackageName());
-        if (i != null) {
-            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
-            startActivity(i);
-        }
-        finishAffinity();
-        ui.postDelayed(() -> android.os.Process.killProcess(android.os.Process.myPid()), 300);     // fresh process = the new profile's own WebView data
+        try { saveSession(); } catch (Exception ignored) { }
+        Intent next = getPackageManager().getLaunchIntentForPackage(getPackageName());
+        if (next != null) next.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+        Intent r = new Intent(this, RestartActivity.class);        // lives in another process: ends this one, then opens the app again
+        r.putExtra("next", next);
+        r.putExtra("pid", android.os.Process.myPid());
+        r.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        startActivity(r);
     }
 
     private void saveSession() {
@@ -2060,6 +2139,7 @@ public class MainActivity extends Activity implements Host {
         if (tab == current) updateChrome();
         final String url = tab.url;
         if (url == null || !url.startsWith("https://")) return;
+        runExtensions(tab, view);
         if (offerSave && !tab.priv) view.evaluateJavascript(HOOK_JS, null);
         if (offerFill && tab == current && store.isSecure()) {
             final String host = UI.hostOf(url);
@@ -2219,6 +2299,546 @@ public class MainActivity extends Activity implements Host {
 
 
 
+
+    // ───────────────────────────── SPS extensions (store + user scripts) ─────────────────────────────
+    private void runExtensions(BTab tab, WebView view) {
+        String host = UI.hostOf(tab.url);
+        if (host.isEmpty()) return;
+        StringBuilder all = new StringBuilder();
+        for (Extensions.Def d : Extensions.CATALOG) {
+            if (!extOn.contains(d.id) || extSiteOff.contains(d.id + "|" + host)) continue;
+            all.append(Extensions.js(d.id, prefs.getInt("ext_opt_" + d.id, d.defaultOption))).append('\n');
+        }
+        for (int i = 0; i < userScripts.length(); i++) {
+            JSONObject o = userScripts.optJSONObject(i);
+            if (o == null || !o.optBoolean("on", true) || !Extensions.hostMatches(o.optString("m", "*"), host)) continue;
+            String css = o.optString("css", ""), code = o.optString("js", "");
+            if (!css.isEmpty()) all.append("(function(){var s=document.createElement('style');s.textContent=").append(Extensions.quote(css)).append(";(document.head||document.documentElement).appendChild(s);})();\n");
+            if (!code.isEmpty()) all.append("try{").append(code).append("\n}catch(e){}\n");
+        }
+        if (all.length() > 0) view.evaluateJavascript("(function(){" + all + "})();", null);
+    }
+
+    private void saveExt() {
+        prefs.edit().putStringSet("ext_on", new HashSet<>(extOn)).putStringSet("ext_siteoff", new HashSet<>(extSiteOff))
+                .putString("ext_user", userScripts.toString()).apply();
+    }
+
+    private void showExtensions() {
+        class ExtPage extends LinearLayout implements Page {
+            ExtPage(Context c) { super(c); }
+            @Override public boolean onBack() { return false; }
+        }
+        ExtPage page = new ExtPage(this);
+        page.setOrientation(LinearLayout.VERTICAL);
+        page.setBackgroundColor(UI.BG);
+        page.setClickable(true);
+        page.addView(Vault.topBar(this, "Extension store"));
+        page.addView(UI.divider(this));
+        final LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        list.setPadding(dp(12), dp(8), dp(12), dp(30));
+        ScrollView sv = new ScrollView(this);
+        sv.addView(list);
+        page.addView(sv, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        fillExtensions(list);
+        push(page);
+    }
+
+    private void fillExtensions(final LinearLayout list) {
+        list.removeAllViews();
+        TextView intro = UI.text(this, "Add-ons that run inside web pages. Chrome extension files cannot run on Android, so SPS ships its own and lets you write your own.", 12, UI.TEXT2, false);
+        intro.setPadding(dp(8), dp(4), dp(8), dp(10));
+        list.addView(intro);
+        for (final Extensions.Def d : Extensions.CATALOG) {
+            final boolean on = extOn.contains(d.id);
+            LinearLayout card = new LinearLayout(this);
+            card.setOrientation(LinearLayout.VERTICAL);
+            card.setPadding(dp(16), dp(14), dp(16), dp(12));
+            card.setBackground(UI.box(this, on ? UI.ACCENT_BG : 0xFFF5F6F8, 18, 0));
+            LinearLayout top = new LinearLayout(this);
+            top.setGravity(Gravity.CENTER_VERTICAL);
+            ImageView ic = new ImageView(this);
+            ic.setImageDrawable(Ico.of(d.icon, UI.ACCENT));
+            top.addView(ic, new LinearLayout.LayoutParams(dp(26), dp(26)));
+            LinearLayout col = new LinearLayout(this);
+            col.setOrientation(LinearLayout.VERTICAL);
+            col.setPadding(dp(12), 0, dp(8), 0);
+            col.addView(UI.text(this, d.name, 16, UI.TEXT, true));
+            col.addView(UI.text(this, d.desc, 12, UI.TEXT2, false));
+            top.addView(col, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            TextView btn = UI.button(this, on ? "Remove" : "Add", !on);
+            btn.setOnClickListener(v -> {
+                if (on) extOn.remove(d.id); else extOn.add(d.id);
+                saveExt(); fillExtensions(list); toast(on ? d.name + " removed" : d.name + " added \u2014 applies to pages you open next");
+            });
+            top.addView(btn);
+            card.addView(top);
+            if (on) {
+                LinearLayout row = new LinearLayout(this);
+                row.setPadding(0, dp(8), 0, 0);
+                if (d.options != null) {
+                    int cur = prefs.getInt("ext_opt_" + d.id, d.defaultOption);
+                    TextView st = UI.button(this, "Setting: " + d.options[Math.max(0, Math.min(d.options.length - 1, cur))], false);
+                    st.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle(d.name)
+                            .setSingleChoiceItems(d.options, prefs.getInt("ext_opt_" + d.id, d.defaultOption), (dd, which) -> {
+                                prefs.edit().putInt("ext_opt_" + d.id, which).apply(); dd.dismiss(); fillExtensions(list);
+                                if (current != null) current.web.reload();
+                            }).show());
+                    row.addView(st);
+                }
+                final String host = current == null || isNewTab(current.url) ? "" : UI.hostOf(current.url);
+                if (!host.isEmpty()) {
+                    final boolean off = extSiteOff.contains(d.id + "|" + host);
+                    TextView sb = UI.button(this, off ? "Allow on " + host : "Off on " + host, false);
+                    sb.setOnClickListener(v -> {
+                        if (off) extSiteOff.remove(d.id + "|" + host); else extSiteOff.add(d.id + "|" + host);
+                        saveExt(); fillExtensions(list); if (current != null) current.web.reload();
+                    });
+                    row.addView(sb);
+                }
+                card.addView(row);
+            }
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.setMargins(0, 0, 0, dp(10));
+            list.addView(card, lp);
+        }
+        TextView hd = UI.text(this, "YOUR OWN SCRIPTS", 12, UI.TEXT2, true);
+        hd.setPadding(dp(8), dp(10), dp(8), dp(6));
+        list.addView(hd);
+        for (int i = 0; i < userScripts.length(); i++) {
+            final int idx = i;
+            final JSONObject o = userScripts.optJSONObject(i);
+            if (o == null) continue;
+            LinearLayout card = new LinearLayout(this);
+            card.setOrientation(LinearLayout.VERTICAL);
+            card.setPadding(dp(16), dp(12), dp(16), dp(10));
+            card.setBackground(UI.box(this, 0xFFF5F6F8, 18, 0));
+            card.addView(UI.text(this, o.optString("n", "Script"), 15, UI.TEXT, true));
+            card.addView(UI.text(this, "Runs on: " + o.optString("m", "*") + (o.optBoolean("on", true) ? "" : "   (off)"), 12, UI.TEXT2, false));
+            LinearLayout row = new LinearLayout(this);
+            TextView t1 = UI.button(this, o.optBoolean("on", true) ? "Turn off" : "Turn on", false);
+            t1.setOnClickListener(v -> { try { o.put("on", !o.optBoolean("on", true)); } catch (Exception ignored) { } saveExt(); fillExtensions(list); });
+            TextView t2 = UI.button(this, "Delete", false);
+            t2.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle("Delete this script?")
+                    .setPositiveButton("Delete", (dd, w) -> { userScripts.remove(idx); saveExt(); fillExtensions(list); })
+                    .setNegativeButton("Cancel", null).show());
+            row.addView(t1); row.addView(t2);
+            card.addView(row);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.setMargins(0, 0, 0, dp(10));
+            list.addView(card, lp);
+        }
+        TextView add = UI.button(this, "+ Write a script / style", true);
+        add.setOnClickListener(v -> addUserScript(list));
+        list.addView(add);
+    }
+
+    private void addUserScript(final LinearLayout list) {
+        LinearLayout f = new LinearLayout(this);
+        f.setOrientation(LinearLayout.VERTICAL);
+        f.setPadding(dp(20), dp(8), dp(20), 0);
+        final EditText name = new EditText(this); name.setHint("Name"); name.setSingleLine(true);
+        final EditText match = new EditText(this); match.setHint("Websites: * or example.com or *.example.com"); match.setText("*"); match.setSingleLine(true);
+        final EditText css = new EditText(this); css.setHint("CSS (optional)"); css.setMinLines(2);
+        final EditText js = new EditText(this); js.setHint("JavaScript (optional)"); js.setMinLines(3);
+        f.addView(name); f.addView(match); f.addView(css); f.addView(js);
+        ScrollView sc = new ScrollView(this); sc.addView(f);
+        new AlertDialog.Builder(this).setTitle("New script").setView(sc)
+                .setPositiveButton("Save", (d, w) -> {
+                    try {
+                        JSONObject o = new JSONObject();
+                        o.put("n", name.getText().toString().trim().isEmpty() ? "My script" : name.getText().toString().trim());
+                        o.put("m", match.getText().toString().trim().isEmpty() ? "*" : match.getText().toString().trim());
+                        o.put("css", css.getText().toString()); o.put("js", js.getText().toString()); o.put("on", true);
+                        userScripts.put(o); saveExt(); fillExtensions(list);
+                    } catch (Exception ignored) { }
+                }).setNegativeButton("Cancel", null).show();
+    }
+
+
+    // ───────────────────────────── saved site permissions ─────────────────────────────
+    private void manageSitePermissions() {
+        final ArrayList<String> keys = new ArrayList<>(), labels = new ArrayList<>();
+        for (java.util.Map.Entry<String, ?> e : prefs.getAll().entrySet()) {
+            String k = e.getKey();
+            if (!k.startsWith("perm:") || !(e.getValue() instanceof String)) continue;
+            String rest = k.substring(5);
+            int cut = rest.lastIndexOf(':');
+            if (cut < 0) continue;
+            keys.add(k);
+            labels.add(rest.substring(0, cut) + "  \u2014  " + rest.substring(cut + 1) + ": " + (e.getValue().equals("allow") ? "allowed" : "blocked"));
+        }
+        if (keys.isEmpty()) { toast("No saved site permissions"); return; }
+        final boolean[] sel = new boolean[keys.size()];
+        new AlertDialog.Builder(this).setTitle("Saved site permissions (select to reset)")
+                .setMultiChoiceItems(labels.toArray(new String[0]), sel, (d, w, c) -> sel[w] = c)
+                .setPositiveButton("Reset selected", (d, w) -> {
+                    SharedPreferences.Editor ed = prefs.edit();
+                    int n = 0;
+                    for (int i = 0; i < sel.length; i++) if (sel[i]) { ed.remove(keys.get(i)); n++; }
+                    ed.apply(); toast(n + " reset \u2014 the site will ask again");
+                })
+                .setNeutralButton("Reset all", (d, w) -> {
+                    SharedPreferences.Editor ed = prefs.edit();
+                    for (String k : keys) ed.remove(k);
+                    ed.apply(); toast("All site permissions reset");
+                })
+                .setNegativeButton("Close", null).show();
+    }
+
+
+    // ───────────────────────────── app updates (GitHub release of this project) ─────────────────────────────
+    private String updateRepo() {
+        int id = getResources().getIdentifier("update_repo", "string", getPackageName());
+        return id == 0 ? "" : getString(id).trim();
+    }
+
+    private String myVersion() {
+        try { return getPackageManager().getPackageInfo(getPackageName(), 0).versionName; } catch (Exception e) { return "0"; }
+    }
+
+    private static String fetchText(String url) throws Exception {
+        java.net.HttpURLConnection c = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
+        c.setConnectTimeout(12000); c.setReadTimeout(20000);
+        c.setRequestProperty("Accept", "application/vnd.github+json");
+        c.setRequestProperty("User-Agent", "SPS-Browser-Android");
+        if (c.getResponseCode() != 200) throw new java.io.IOException("HTTP " + c.getResponseCode());
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        try (java.io.InputStream in = c.getInputStream()) {
+            byte[] b = new byte[8192]; int n;
+            while ((n = in.read(b)) > 0 && out.size() < 2_000_000) out.write(b, 0, n);
+        }
+        return out.toString("UTF-8");
+    }
+
+    /** manual = the user pressed "Check for updates" (always answers); otherwise it runs quietly at most every 12 hours. */
+    private void checkForUpdate(final boolean manual) {
+        final String repo = updateRepo();
+        if (repo.isEmpty() || !repo.matches("[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")) {
+            if (manual) toast("Updates are not set up in this build (it was not built by the project's GitHub workflow)");
+            return;
+        }
+        if (!manual) {
+            long last = prefs.getLong("update_checked", 0);
+            if (System.currentTimeMillis() - last < 12L * 3600 * 1000) return;
+        }
+        if (manual) toast("Checking for updates...");
+        new Thread(() -> {
+            try {
+                final Updater.Info info = Updater.fromRelease(fetchText("https://api.github.com/repos/" + repo + "/releases/latest"));
+                prefs.edit().putLong("update_checked", System.currentTimeMillis()).apply();
+                runOnUiThread(() -> {
+                    if (isFinishing()) return;
+                    if (info != null && Updater.isNewer(info.version, myVersion())) offerUpdate(info);
+                    else if (manual) toast("You have the latest version (" + myVersion() + ")");
+                });
+            } catch (Exception e) {
+                if (manual) runOnUiThread(() -> toast("Could not check for updates: " + e.getMessage()));
+            }
+        }, "sps-update-check").start();
+    }
+
+    private void offerUpdate(final Updater.Info info) {
+        String size = info.size > 0 ? "  (" + android.text.format.Formatter.formatShortFileSize(this, info.size) + ")" : "";
+        String notes = info.notes == null ? "" : info.notes.trim();
+        if (notes.length() > 600) notes = notes.substring(0, 600) + "...";
+        new AlertDialog.Builder(this).setTitle("SPS Browser " + info.version + " is available")
+                .setMessage("You have " + myVersion() + size + ".\n\nThe file is checked (SHA-256) and Android only installs it if it is signed with the same key as this app.\n\n" + notes)
+                .setPositiveButton("Download & install", (d, w) -> downloadUpdate(info))
+                .setNegativeButton("Later", null).show();
+    }
+
+    private void downloadUpdate(final Updater.Info info) {
+        if (downloadingUpdate >= 0) { toast("Already downloading"); return; }
+        DownloadManager dm = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
+        if (dm == null) { toast("Downloads are not available"); return; }
+        DownloadManager.Request r = new DownloadManager.Request(Uri.parse(info.apkUrl));
+        r.setTitle("SPS Browser " + info.version);
+        r.setMimeType("application/vnd.android.package-archive");
+        r.setDestinationInExternalFilesDir(this, Environment.DIRECTORY_DOWNLOADS, "update-" + info.version + ".apk");
+        r.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE);
+        downloadingUpdate = dm.enqueue(r);
+        toast("Downloading the update...");
+        pollUpdate(info);
+    }
+
+    private void pollUpdate(final Updater.Info info) {
+        ui.postDelayed(() -> {
+            DownloadManager dm = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
+            Cursor c = null;
+            try {
+                c = dm.query(new DownloadManager.Query().setFilterById(downloadingUpdate));
+                if (c == null || !c.moveToFirst()) { downloadingUpdate = -1; return; }
+                int st = c.getInt(c.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS));
+                if (st == DownloadManager.STATUS_SUCCESSFUL) {
+                    long id = downloadingUpdate; downloadingUpdate = -1;
+                    verifyAndInstall(info, dm.getUriForDownloadedFile(id), id);
+                } else if (st == DownloadManager.STATUS_FAILED) {
+                    downloadingUpdate = -1; toast("The update download failed");
+                } else pollUpdate(info);
+            } catch (Exception e) {
+                downloadingUpdate = -1;
+            } finally { if (c != null) c.close(); }
+        }, 1000);
+    }
+
+    private void verifyAndInstall(final Updater.Info info, final Uri file, final long dlId) {
+        new Thread(() -> {
+            String problem = null;
+            try {
+                String want = null;
+                if (info.sumsUrl != null) want = Updater.hashFor(fetchText(info.sumsUrl), info.apkName);
+                if (want == null) problem = "The release has no checksum for this file";
+                else {
+                    String got;
+                    try (java.io.InputStream in = getContentResolver().openInputStream(file)) { got = Updater.sha256(in); }
+                    if (!got.equals(want)) problem = "The downloaded file does not match its checksum";
+                }
+            } catch (Exception e) { problem = "Could not check the file: " + e.getMessage(); }
+            final String bad = problem;
+            runOnUiThread(() -> {
+                if (bad != null) {
+                    try { ((DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE)).remove(dlId); } catch (Exception ignored) { }
+                    new AlertDialog.Builder(this).setTitle("Update not installed").setMessage(bad + ". The file was deleted for your safety.").setPositiveButton("OK", null).show();
+                    return;
+                }
+                installApk(file);
+            });
+        }, "sps-update-verify").start();
+    }
+
+    private void installApk(Uri file) {
+        if (Build.VERSION.SDK_INT >= 26 && !getPackageManager().canRequestPackageInstalls()) {
+            new AlertDialog.Builder(this).setTitle("Allow installing updates")
+                    .setMessage("Android needs your permission once so SPS Browser can install its own updates. Turn it on, then press Check for updates again.")
+                    .setPositiveButton("Open settings", (d, w) -> startActivity(new Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + getPackageName()))))
+                    .setNegativeButton("Cancel", null).show();
+            return;
+        }
+        try {
+            Intent i = new Intent(Intent.ACTION_VIEW);
+            i.setDataAndType(file, "application/vnd.android.package-archive");
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(i);
+        } catch (Exception e) { toast("Could not open the installer"); }
+    }
+
+
+    // ───────────────────────────── read aloud / home-screen shortcut ─────────────────────────────
+    private android.speech.tts.TextToSpeech tts;
+    private boolean ttsSpeaking;
+
+    private void readAloud() {
+        if (current == null || isNewTab(current.url)) { toast("Open a page first"); return; }
+        if (tts != null && ttsSpeaking) { tts.stop(); ttsSpeaking = false; toast("Stopped"); return; }
+        current.web.evaluateJavascript("(function(){var t=document.body?document.body.innerText:'';return t.substring(0,6000);})()", value -> {
+            String text = "";
+            try { Object o = new org.json.JSONTokener(value == null ? "\"\"" : value).nextValue(); text = o == null ? "" : String.valueOf(o); } catch (Exception ignored) { }
+            if (text.trim().isEmpty()) { toast("Nothing to read on this page"); return; }
+            final String say = text;
+            if (tts == null) {
+                tts = new android.speech.tts.TextToSpeech(getApplicationContext(), status -> {
+                    if (status == android.speech.tts.TextToSpeech.SUCCESS) { tts.setLanguage(Locale.getDefault()); speak(say); }
+                    else { toast("Text-to-speech is not available on this phone"); tts = null; }
+                });
+            } else speak(say);
+        });
+    }
+
+    private void speak(String text) {
+        ttsSpeaking = true;
+        tts.speak(text, android.speech.tts.TextToSpeech.QUEUE_FLUSH, null, "sps-read");
+        toast("Reading aloud - open the menu to stop");
+    }
+
+    private void addToHomeScreen() {
+        if (current == null || isNewTab(current.url)) { toast("Open a page first"); return; }
+        if (Build.VERSION.SDK_INT < 26) { toast("Needs Android 8 or newer"); return; }
+        android.content.pm.ShortcutManager sm = getSystemService(android.content.pm.ShortcutManager.class);
+        if (sm == null || !sm.isRequestPinShortcutSupported()) { toast("Your launcher does not support home-screen shortcuts"); return; }
+        String title = current.title == null || current.title.isEmpty() ? UI.hostOf(current.url) : current.title;
+        Bitmap bmp = Bitmap.createBitmap(192, 192, Bitmap.Config.ARGB_8888);
+        android.graphics.Canvas cv = new android.graphics.Canvas(bmp);
+        android.graphics.Paint p = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        p.setColor(UI.ACCENT);
+        cv.drawCircle(96, 96, 96, p);
+        p.setColor(Color.WHITE); p.setTextSize(110); p.setTextAlign(android.graphics.Paint.Align.CENTER); p.setTypeface(Typeface.DEFAULT_BOLD);
+        cv.drawText(title.substring(0, 1).toUpperCase(), 96, 134, p);
+        Intent open = new Intent(Intent.ACTION_VIEW, Uri.parse(current.url), this, MainActivity.class);
+        android.content.pm.ShortcutInfo info = new android.content.pm.ShortcutInfo.Builder(this, "sps-" + Integer.toHexString(current.url.hashCode()))
+                .setShortLabel(title.length() > 24 ? title.substring(0, 24) : title)
+                .setIcon(android.graphics.drawable.Icon.createWithBitmap(bmp)).setIntent(open).build();
+        sm.requestPinShortcut(info, null);
+    }
+
+
+    // ───────────────────────────── Lens search (photo -> Google Lens) ─────────────────────────────
+    private void startLens() {
+        new AlertDialog.Builder(this).setTitle("Search with Lens")
+                .setItems(new String[]{"Take a photo", "Choose a photo"}, (d, which) -> {
+                    if (which == 0) {
+                        if (checkSelfPermission(android.Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED)
+                            requestPermissions(new String[]{android.Manifest.permission.CAMERA}, REQ_LENS_PERM);
+                        else lensCapture();
+                    } else {
+                        lensCamera = null;
+                        Intent pick = new Intent(Intent.ACTION_GET_CONTENT);
+                        pick.addCategory(Intent.CATEGORY_OPENABLE);
+                        pick.setType("image/*");
+                        try { startActivityForResult(pick, REQ_LENS); } catch (Exception e) { toast("No gallery app found"); }
+                    }
+                }).setNegativeButton("Cancel", null).show();
+    }
+
+    private void lensCapture() {
+        try {
+            android.content.ContentValues cv = new android.content.ContentValues();
+            cv.put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, "SPS_lens_" + System.currentTimeMillis() + ".jpg");
+            cv.put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/jpeg");
+            lensCamera = getContentResolver().insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv);
+            if (lensCamera == null) throw new IllegalStateException();
+            Intent it = new Intent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE);
+            it.putExtra(android.provider.MediaStore.EXTRA_OUTPUT, lensCamera);
+            it.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivityForResult(it, REQ_LENS);
+        } catch (Exception e) { toast("Camera is not available"); }
+    }
+
+    private void onLensPicked(int resultCode, Intent data) {
+        final Uri cam = lensCamera;
+        lensCamera = null;
+        final Uri src = resultCode == RESULT_OK ? (data != null && data.getData() != null ? data.getData() : cam) : null;
+        if (src == null) {
+            if (cam != null) { try { getContentResolver().delete(cam, null, null); } catch (Exception ignored) { } }
+            return;
+        }
+        toast("Preparing the photo...");
+        new Thread(() -> {
+            String b64 = null;
+            try {
+                BitmapFactory.Options o = new BitmapFactory.Options();
+                o.inJustDecodeBounds = true;
+                try (java.io.InputStream in = getContentResolver().openInputStream(src)) { BitmapFactory.decodeStream(in, null, o); }
+                int sample = 1;
+                while (Math.max(o.outWidth, o.outHeight) / sample > 1600) sample *= 2;
+                BitmapFactory.Options o2 = new BitmapFactory.Options();
+                o2.inSampleSize = sample;
+                Bitmap bmp;
+                try (java.io.InputStream in = getContentResolver().openInputStream(src)) { bmp = BitmapFactory.decodeStream(in, null, o2); }
+                int rot = 0;
+                try (java.io.InputStream in = getContentResolver().openInputStream(src)) {
+                    int ori = new android.media.ExifInterface(in).getAttributeInt(android.media.ExifInterface.TAG_ORIENTATION, 1);
+                    rot = ori == 6 ? 90 : ori == 3 ? 180 : ori == 8 ? 270 : 0;
+                } catch (Exception ignored) { }
+                if (bmp != null && rot != 0) {
+                    android.graphics.Matrix m = new android.graphics.Matrix(); m.postRotate(rot);
+                    bmp = Bitmap.createBitmap(bmp, 0, 0, bmp.getWidth(), bmp.getHeight(), m, true);
+                }
+                if (bmp != null) {
+                    java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+                    bmp.compress(Bitmap.CompressFormat.JPEG, 85, out);
+                    b64 = android.util.Base64.encodeToString(out.toByteArray(), android.util.Base64.NO_WRAP);
+                }
+            } catch (Exception ignored) { }
+            if (cam != null) { try { getContentResolver().delete(cam, null, null); } catch (Exception ignored) { } }   // do not leave the photo in the gallery
+            final String data64 = b64;
+            runOnUiThread(() -> {
+                if (data64 == null) { toast("That photo could not be read"); return; }
+                BTab t = newTab(null, false, true);
+                t.web.loadDataWithBaseURL("https://lens.google.com/", Lens.uploadPage(Lens.UPLOAD, Lens.FIELD, data64), "text/html", "utf-8", null);
+            });
+        }, "sps-lens").start();
+    }
+
+    // ───────────────────────────── page tools ─────────────────────────────
+    private void showTools() {
+        final boolean page = current != null && !isNewTab(current.url);
+        final ArrayList<String> labels = new ArrayList<>();
+        final ArrayList<Runnable> acts = new ArrayList<>();
+        if (page) {
+            labels.add("Screenshot of this page"); acts.add(this::screenshotPage);
+            labels.add("Page information"); acts.add(this::pageInfo);
+            labels.add("View page source"); acts.add(this::viewSource);
+            labels.add("Copy all page text"); acts.add(this::copyPageText);
+            labels.add("Scroll to top"); acts.add(() -> current.web.scrollTo(0, 0));
+            labels.add("Scroll to bottom"); acts.add(() -> current.web.evaluateJavascript("window.scrollTo(0,document.body.scrollHeight)", null));
+        }
+        labels.add("Open link from clipboard"); acts.add(this::pasteAndGo);
+        labels.add("Search with Lens"); acts.add(this::startLens);
+        labels.add("Voice search"); acts.add(this::voiceSearch);
+        new AlertDialog.Builder(this).setTitle("Page tools")
+                .setItems(labels.toArray(new String[0]), (d, which) -> acts.get(which).run()).show();
+    }
+
+    private void screenshotPage() {
+        if (current == null || current.web.getWidth() <= 0) return;
+        try {
+            Bitmap b = Bitmap.createBitmap(current.web.getWidth(), current.web.getHeight(), Bitmap.Config.ARGB_8888);
+            current.web.draw(new android.graphics.Canvas(b));
+            String name = "SPS_" + new java.text.SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new java.util.Date()) + ".png";
+            if (Build.VERSION.SDK_INT >= 29) {
+                android.content.ContentValues cv = new android.content.ContentValues();
+                cv.put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, name);
+                cv.put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/png");
+                cv.put(android.provider.MediaStore.Images.Media.RELATIVE_PATH, "Pictures/SPS Browser");
+                Uri u = getContentResolver().insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv);
+                if (u == null) throw new java.io.IOException("no file");
+                try (java.io.OutputStream out = getContentResolver().openOutputStream(u)) { b.compress(Bitmap.CompressFormat.PNG, 100, out); }
+                toast("Saved to Pictures/SPS Browser");
+            } else {
+                java.io.File dir = getExternalFilesDir(Environment.DIRECTORY_PICTURES);
+                java.io.File f = new java.io.File(dir, name);
+                try (java.io.OutputStream out = new java.io.FileOutputStream(f)) { b.compress(Bitmap.CompressFormat.PNG, 100, out); }
+                toast("Saved: " + f.getAbsolutePath());
+            }
+        } catch (Exception e) { toast("Could not save the screenshot"); }
+    }
+
+    private void pageInfo() {
+        if (current == null) return;
+        StringBuilder sb = new StringBuilder();
+        sb.append("Title: ").append(current.title).append("\n\nAddress: ").append(current.url).append("\n\n");
+        boolean https = current.url != null && current.url.startsWith("https://");
+        sb.append("Connection: ").append(https ? "encrypted (https)" : "NOT encrypted").append('\n');
+        android.net.http.SslCertificate c = current.web.getCertificate();
+        if (c != null) {
+            sb.append("Issued to: ").append(c.getIssuedTo() == null ? "?" : c.getIssuedTo().getCName()).append('\n');
+            sb.append("Issued by: ").append(c.getIssuedBy() == null ? "?" : c.getIssuedBy().getCName()).append('\n');
+            sb.append("Valid until: ").append(c.getValidNotAfterDate()).append('\n');
+        }
+        sb.append("\nPrivacy shield here: ").append(shieldOff.contains(UI.hostOf(current.url)) ? "paused" : (adBlock ? "on" : "off"));
+        new AlertDialog.Builder(this).setTitle("Page information").setMessage(sb.toString()).setPositiveButton("OK", null).show();
+    }
+
+    private void viewSource() {
+        if (current == null) return;
+        current.web.evaluateJavascript("document.documentElement.outerHTML", value -> {
+            String src = "";
+            try { Object o = new org.json.JSONTokener(value == null ? "\"\"" : value).nextValue(); src = o == null ? "" : String.valueOf(o); } catch (Exception ignored) { }
+            BTab t = newTab(null, false, true);
+            t.web.loadDataWithBaseURL("about:blank", "<html><head><meta name='viewport' content='width=device-width'></head><body style='margin:8px'><pre style='white-space:pre-wrap;word-break:break-all;font-size:12px'>"
+                    + android.text.TextUtils.htmlEncode(src) + "</pre></body></html>", "text/html", "utf-8", null);
+        });
+    }
+
+    private void copyPageText() {
+        if (current == null) return;
+        current.web.evaluateJavascript("document.body?document.body.innerText:''", value -> {
+            String text = "";
+            try { Object o = new org.json.JSONTokener(value == null ? "\"\"" : value).nextValue(); text = o == null ? "" : String.valueOf(o); } catch (Exception ignored) { }
+            if (text.trim().isEmpty()) toast("Nothing to copy"); else { copyText(text); }
+        });
+    }
+
+    private void pasteAndGo() {
+        ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        CharSequence t = null;
+        if (cm != null && cm.hasPrimaryClip() && cm.getPrimaryClip().getItemCount() > 0) t = cm.getPrimaryClip().getItemAt(0).getText();
+        if (t == null || t.toString().trim().isEmpty()) { toast("The clipboard is empty"); return; }
+        go(t.toString());
+    }
+
     // ───────────────────────────── thought of the day ─────────────────────────────
     private void showQuote(boolean next) {
         if (next) quoteIndex++; else quoteIndex = Quotes.today();
@@ -2316,6 +2936,7 @@ public class MainActivity extends Activity implements Host {
         settingSwitch(list, "Safe Browsing", "Warn about dangerous sites", safeBrowsing, v -> { safeBrowsing = v; putBool("safebrowsing", v); applyAllTabs(); });
         settingSwitch(list, "Block screenshots", "Also hides the app in recent apps", blockShots, v -> { blockShots = v; putBool("blockshots", v); applySecure(); });
         settingLink(list, "lock", "Sites with the shield paused", shieldOff.size() + " sites", this::manageShieldOff);
+        settingLink(list, "lock", "Site permissions", "Camera, microphone, location, DRM ...", this::manageSitePermissions);
         settingLink(list, "trash", "Clear browsing data", "Cookies, cache, history", this::clearData);
         TextView note = UI.text(this, "Pages always load over https. Camera, microphone and location are only used after you allow them for a site.", 12, UI.TEXT2, false);
         note.setPadding(dp(18), dp(16), dp(18), 0);
@@ -2393,6 +3014,7 @@ public class MainActivity extends Activity implements Host {
             else toast("Screen lock not confirmed");
             return;
         }
+        if (requestCode == REQ_LENS) { onLensPicked(resultCode, data); return; }
         if (requestCode == REQ_APPLOCK) {
             if (resultCode == RESULT_OK) { lockPending = false; unlockedAt = System.currentTimeMillis(); removeLock(); }
             return;
@@ -2414,6 +3036,24 @@ public class MainActivity extends Activity implements Host {
         super.onNewIntent(intent);
         Uri data = intent.getData();
         if (data != null) newTab(data.toString(), false, true);
+        handleCommand(intent);
+    }
+
+    /** Buttons of the home-screen search widget. */
+    private void handleCommand(Intent intent) {
+        if (intent == null) return;
+        String cmd = intent.getStringExtra(SearchWidget.CMD);
+        if (cmd == null) return;
+        intent.removeExtra(SearchWidget.CMD);
+        if (lockOverlay != null) return;                       // locked: nothing starts before the unlock
+        if (cmd.equals(SearchWidget.VOICE)) voiceSearch();
+        else if (cmd.equals(SearchWidget.LENS)) startLens();
+        else {
+            if (current != null && !isNewTab(current.url)) newTab(null, current.priv, true);
+            urlBar.requestFocus();
+            InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+            if (imm != null) imm.showSoftInput(urlBar, InputMethodManager.SHOW_IMPLICIT);
+        }
     }
 
     @Override
@@ -2455,11 +3095,13 @@ public class MainActivity extends Activity implements Host {
         super.onResume();
         maybeLock();
         maybeShowDailyQuote();
+        if (autoUpdate) checkForUpdate(false);
         for (BTab t : tabs) t.web.onResume();
     }
 
     @Override
     protected void onDestroy() {
+        if (tts != null) { try { tts.stop(); tts.shutdown(); } catch (Exception ignored) { } tts = null; }
         if (clearOnExit && isFinishing() && !switchingProfile) clearAllDataNow();
         for (BTab t : new ArrayList<>(tabs)) {
             webHolder.removeView(t.web);
