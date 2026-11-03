@@ -104,6 +104,9 @@ public class MainActivity extends Activity implements Host {
 
     private SharedPreferences prefs;
     private boolean adBlock = true;
+    private boolean hideBanners = true;              // hides cookie / consent pop-ups of the common consent tools
+    private boolean ytShield = true;                  // YouTube: remove the ads from the player data (like Brave), no lag
+    private String ytJs;
     private boolean darkMode = false;
     private boolean thirdPartyCookies = false;
     private boolean jsEnabled = true;
@@ -171,6 +174,8 @@ public class MainActivity extends Activity implements Host {
         prefs = getSharedPreferences(profiles.prefsName(profiles.activeId()), MODE_PRIVATE);
         store = new Store(prefs, profiles.activeId());
         adBlock = prefs.getBoolean("adblock", true);
+        ytShield = prefs.getBoolean("ytshield", true);
+        hideBanners = prefs.getBoolean("hidebanners", true);
         darkMode = prefs.getBoolean("dark", false);
         thirdPartyCookies = prefs.getBoolean("thirdcookies", false);
         jsEnabled = prefs.getBoolean("js", true);
@@ -583,6 +588,10 @@ public class MainActivity extends Activity implements Host {
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
                 String reqHost = request.getUrl().getHost();
                 String pageHost = UI.hostOf(tab.url);
+                if (adBlock && ytShield && !request.isForMainFrame() && isYoutubeAdRequest(request.getUrl()) && !shieldOff.contains(pageHost)) {
+                    blockedCount.incrementAndGet();
+                    return new WebResourceResponse("text/plain", "utf-8", new ByteArrayInputStream(new byte[0]));
+                }
                 if (adBlock && !request.isForMainFrame() && !shieldOff.contains(pageHost) && isBlockedHost(reqHost)
                         && Shield.isThirdParty(pageHost, reqHost)) {
                     blockedCount.incrementAndGet();
@@ -592,7 +601,13 @@ public class MainActivity extends Activity implements Host {
             }
 
             @Override
+            public void onPageCommitVisible(WebView view, String url) {
+                injectYoutubeShield(view, url);
+            }
+
+            @Override
             public void onPageStarted(WebView view, String url, Bitmap favicon) {
+                injectYoutubeShield(view, url);
                 tab.url = url == null ? "" : url;
                 tab.loading = true;
                 if (tab == current) {
@@ -613,6 +628,7 @@ public class MainActivity extends Activity implements Host {
                     if (!urlBar.hasFocus()) urlBar.setText(isNewTab(tab.url) ? "" : tab.url);
                 }
                 if (!tab.priv && saveHistory && !isNewTab(tab.url) && tab.url.startsWith("https://")) addHistory(tab.title, tab.url);
+                injectYoutubeShield(view, url);
                 afterPageLoad(tab, view);
             }
 
@@ -1082,31 +1098,90 @@ public class MainActivity extends Activity implements Host {
         }
     }
 
-    /** Selected area: drag a box on the page; only that part is printed (as a picture). */
+    /** Selected area: drag a box on the page; only that part is printed (as a picture). Never crashes: every step is guarded. */
     private void printSelectedArea() {
         final BTab t = current;
-        if (t == null) return;
+        if (t == null || t.web == null) return;
         Toast.makeText(this, "Drag a box around the part to print", Toast.LENGTH_LONG).show();
         final SelectionView sel = new SelectionView(this);
         webHolder.addView(sel, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         sel.listener = rect -> {
-            webHolder.removeView(sel);
-            if (rect == null) return;
-            try {
-                Bitmap full = Bitmap.createBitmap(t.web.getWidth(), t.web.getHeight(), Bitmap.Config.ARGB_8888);
-                android.graphics.Canvas c = new android.graphics.Canvas(full);
-                c.drawColor(Color.WHITE);
-                t.web.draw(c);
-                int l = Math.max(0, rect.left), tp = Math.max(0, rect.top);
-                int w = Math.min(full.getWidth() - l, rect.width()), h = Math.min(full.getHeight() - tp, rect.height());
-                if (w < 10 || h < 10) return;
-                Bitmap crop = Bitmap.createBitmap(full, l, tp, w, h);
-                PrintManager pm = (PrintManager) getSystemService(Context.PRINT_SERVICE);
-                pm.print("SPS selection", new BitmapPrintAdapter(this, crop), new PrintAttributes.Builder().build());
-            } catch (Throwable e) {
-                Toast.makeText(this, "Could not print the selected area", Toast.LENGTH_SHORT).show();
-            }
+            // never change the view tree from inside its own touch callback (that was the crash): do it on the next loop
+            webHolder.post(() -> {
+                try { webHolder.removeView(sel); } catch (Throwable ignored) { }
+                if (rect == null) return;
+                captureArea(t.web, rect, bmp -> {
+                    if (bmp == null) { Toast.makeText(this, "Could not capture that part of the page", Toast.LENGTH_SHORT).show(); return; }
+                    areaActions(bmp);
+                });
+            });
         };
+    }
+
+    private interface BitmapCb { void got(Bitmap b); }
+
+    /** PixelCopy (reads what is really on screen, works with the hardware-accelerated WebView); View.draw only as a fallback. */
+    private void captureArea(final View v, android.graphics.Rect r, final BitmapCb cb) {
+        try {
+            final int[] loc = new int[2];
+            v.getLocationInWindow(loc);
+            int l = Math.max(0, r.left), tp = Math.max(0, r.top);
+            int w = Math.min(v.getWidth() - l, r.width()), h = Math.min(v.getHeight() - tp, r.height());
+            if (w < 12 || h < 12) { cb.got(null); return; }
+            // keep memory sane: very big boxes are captured at most 4000 px wide/high
+            if (w > 4000 || h > 4000) { cb.got(null); return; }
+            final Bitmap out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+            final android.graphics.Rect src = new android.graphics.Rect(loc[0] + l, loc[1] + tp, loc[0] + l + w, loc[1] + tp + h);
+            if (android.os.Build.VERSION.SDK_INT >= 26) {
+                android.view.PixelCopy.request(getWindow(), src, out, res -> {
+                    cb.got(res == android.view.PixelCopy.SUCCESS ? out : null);
+                }, new android.os.Handler(android.os.Looper.getMainLooper()));
+                return;
+            }
+            android.graphics.Canvas c = new android.graphics.Canvas(out);
+            c.drawColor(Color.WHITE);
+            c.translate(-l, -tp);
+            v.draw(c);
+            cb.got(out);
+        } catch (Throwable e) {
+            cb.got(null);
+        }
+    }
+
+    private void areaActions(final Bitmap bmp) {
+        final String[] items = {"Print / Save as PDF", "Save as picture (Pictures folder)", "Share picture"};
+        new AlertDialog.Builder(this).setTitle("Selected area").setItems(items, (d, which) -> {
+            try {
+                if (which == 0) {
+                    PrintManager pm = (PrintManager) getSystemService(Context.PRINT_SERVICE);
+                    pm.print("SPS selection", new BitmapPrintAdapter(this, bmp), new PrintAttributes.Builder().build());
+                } else {
+                    android.net.Uri u = saveBitmapToPictures(bmp);
+                    if (u == null) { Toast.makeText(this, "Could not save the picture", Toast.LENGTH_SHORT).show(); return; }
+                    if (which == 1) Toast.makeText(this, "Saved in Pictures/SPS", Toast.LENGTH_SHORT).show();
+                    else {
+                        Intent i = new Intent(Intent.ACTION_SEND).setType("image/png").putExtra(Intent.EXTRA_STREAM, u)
+                                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                        startActivity(Intent.createChooser(i, "Share picture"));
+                    }
+                }
+            } catch (Throwable e) {
+                Toast.makeText(this, "That did not work: " + e.getClass().getSimpleName(), Toast.LENGTH_SHORT).show();
+            }
+        }).setNegativeButton("Cancel", null).show();
+    }
+
+    private android.net.Uri saveBitmapToPictures(Bitmap bmp) {
+        try {
+            android.content.ContentValues cv = new android.content.ContentValues();
+            cv.put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, "SPS_" + System.currentTimeMillis() + ".png");
+            cv.put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/png");
+            if (android.os.Build.VERSION.SDK_INT >= 29) cv.put(android.provider.MediaStore.Images.Media.RELATIVE_PATH, "Pictures/SPS");
+            android.net.Uri u = getContentResolver().insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv);
+            if (u == null) return null;
+            try (java.io.OutputStream os = getContentResolver().openOutputStream(u)) { bmp.compress(Bitmap.CompressFormat.PNG, 100, os); }
+            return u;
+        } catch (Throwable e) { return null; }
     }
 
     /** Transparent layer that lets the user drag a rectangle. */
@@ -1263,6 +1338,47 @@ public class MainActivity extends Activity implements Host {
                 if (!line.isEmpty() && !line.startsWith("#")) blocked.add(line);
             }
         } catch (Exception ignored) { }
+    }
+
+    private static boolean isYoutubeHost(String h) {
+        return h != null && (h.equals("youtube.com") || h.endsWith(".youtube.com"));
+    }
+
+    /** Only the requests that load or report ads - never the video or the page itself, so nothing can break or lag. */
+    private boolean isYoutubeAdRequest(android.net.Uri u) {
+        String h = u.getHost(), p = u.getPath();
+        if (h == null || p == null) return false;
+        h = h.toLowerCase();
+        if (h.equals("googleads.g.doubleclick.net") || h.equals("static.doubleclick.net") || h.endsWith(".googlesyndication.com")) return true;
+        if (!isYoutubeHost(h)) return false;
+        return p.startsWith("/api/stats/ads") || p.startsWith("/pagead/") || p.startsWith("/ptracking") || p.startsWith("/get_midroll_info")
+                || p.startsWith("/api/stats/atr") && u.toString().contains("adformat");
+    }
+
+    /** The script is idempotent (it guards itself), so it may be injected on several page events. */
+    private static final String BANNER_JS = "(function(){if(document.getElementById('sps-banner-css'))return;var s=document.createElement('style');s.id='sps-banner-css';"
+            + "s.textContent='#onetrust-banner-sdk,#onetrust-consent-sdk,#CybotCookiebotDialog,#cookie-law-info-bar,#cmpbox,.cc-window,.cookie-notice,#cookie-notice,"
+            + ".truste_overlay,.truste_box_overlay,#sp_message_container_0,.fc-consent-root,#didomi-host,.qc-cmp2-container,#usercentrics-root,"
+            + ".osano-cm-window,#cookiebanner,.cookie-banner,.cookie-consent{display:none !important} html,body{overflow:auto !important}';"
+            + "(document.head||document.documentElement).appendChild(s);})();";
+
+    private void injectYoutubeShield(WebView view, String url) {
+        try {
+            if (hideBanners && url != null && url.startsWith("http") && !UI.hostOf(url).isEmpty() && !shieldOff.contains(UI.hostOf(url)))
+                view.evaluateJavascript(BANNER_JS, null);
+            if (!adBlock || !ytShield || url == null) return;
+            String host = UI.hostOf(url);
+            if (!isYoutubeHost(host) || shieldOff.contains(host)) return;
+            if (ytJs == null) {
+                try (java.io.InputStream in = getAssets().open("yt_shield.js")) {
+                    java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+                    byte[] buf = new byte[4096]; int n;
+                    while ((n = in.read(buf)) > 0) bo.write(buf, 0, n);
+                    ytJs = bo.toString("UTF-8");
+                }
+            }
+            view.evaluateJavascript(ytJs, null);
+        } catch (Throwable ignored) { }
     }
 
     private boolean isBlockedHost(String host) {
@@ -1888,6 +2004,8 @@ public class MainActivity extends Activity implements Host {
 
         settingHeader(list, "Privacy & security");
         settingSwitch(list, "Block ads & trackers", "Hides known ad and tracking servers", adBlock, v -> { adBlock = v; putBool("adblock", v); });
+        settingSwitch(list, "Smart YouTube ad blocking", "Removes the ad schedule from the video data, hides ad boxes. Light on battery, no lag", ytShield, v -> { ytShield = v; putBool("ytshield", v); });
+        settingSwitch(list, "Hide cookie pop-ups", "Hides the consent banners of the common cookie tools (nothing is accepted for you)", hideBanners, v -> { hideBanners = v; putBool("hidebanners", v); });
         settingSwitch(list, "Remove tracking from links", "Cleans utm_*, fbclid, gclid ... from addresses", stripLinks, v -> { stripLinks = v; putBool("striplinks", v); });
         settingSwitch(list, "Allow third-party cookies", "Off is more private; some logins need it", thirdPartyCookies, v -> { thirdPartyCookies = v; putBool("thirdcookies", v); applyAllTabs(); });
         settingSwitch(list, "Safe Browsing", "Warn about dangerous sites", safeBrowsing, v -> { safeBrowsing = v; putBool("safebrowsing", v); applyAllTabs(); });
@@ -2761,6 +2879,10 @@ public class MainActivity extends Activity implements Host {
             labels.add("Page information"); acts.add(this::pageInfo);
             labels.add("View page source"); acts.add(this::viewSource);
             labels.add("Copy all page text"); acts.add(this::copyPageText);
+            labels.add("Print / Save page as PDF"); acts.add(this::printPage);
+            labels.add("Print selected area"); acts.add(this::printSelectedArea);
+            labels.add("Share this page"); acts.add(() -> startActivity(Intent.createChooser(new Intent(Intent.ACTION_SEND).setType("text/plain")
+                    .putExtra(Intent.EXTRA_TEXT, current.url).putExtra(Intent.EXTRA_SUBJECT, current.title), "Share page")));
             labels.add("Scroll to top"); acts.add(() -> current.web.scrollTo(0, 0));
             labels.add("Scroll to bottom"); acts.add(() -> current.web.evaluateJavascript("window.scrollTo(0,document.body.scrollHeight)", null));
         }
@@ -2773,26 +2895,11 @@ public class MainActivity extends Activity implements Host {
 
     private void screenshotPage() {
         if (current == null || current.web.getWidth() <= 0) return;
-        try {
-            Bitmap b = Bitmap.createBitmap(current.web.getWidth(), current.web.getHeight(), Bitmap.Config.ARGB_8888);
-            current.web.draw(new android.graphics.Canvas(b));
-            String name = "SPS_" + new java.text.SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new java.util.Date()) + ".png";
-            if (Build.VERSION.SDK_INT >= 29) {
-                android.content.ContentValues cv = new android.content.ContentValues();
-                cv.put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, name);
-                cv.put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/png");
-                cv.put(android.provider.MediaStore.Images.Media.RELATIVE_PATH, "Pictures/SPS Browser");
-                Uri u = getContentResolver().insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv);
-                if (u == null) throw new java.io.IOException("no file");
-                try (java.io.OutputStream out = getContentResolver().openOutputStream(u)) { b.compress(Bitmap.CompressFormat.PNG, 100, out); }
-                toast("Saved to Pictures/SPS Browser");
-            } else {
-                java.io.File dir = getExternalFilesDir(Environment.DIRECTORY_PICTURES);
-                java.io.File f = new java.io.File(dir, name);
-                try (java.io.OutputStream out = new java.io.FileOutputStream(f)) { b.compress(Bitmap.CompressFormat.PNG, 100, out); }
-                toast("Saved: " + f.getAbsolutePath());
-            }
-        } catch (Exception e) { toast("Could not save the screenshot"); }
+        captureArea(current.web, new android.graphics.Rect(0, 0, current.web.getWidth(), current.web.getHeight()), bmp -> {
+            if (bmp == null) { toast("Could not take the screenshot"); return; }
+            android.net.Uri u = saveBitmapToPictures(bmp);
+            toast(u == null ? "Could not save the screenshot" : "Saved to Pictures/SPS");
+        });
     }
 
     private void pageInfo() {
@@ -2931,6 +3038,7 @@ public class MainActivity extends Activity implements Host {
         }
         settingHeader(list, "Protection");
         settingSwitch(list, "Block ads & trackers", "Known ad and tracking servers (third-party only)", adBlock, v -> { adBlock = v; putBool("adblock", v); });
+        settingSwitch(list, "Smart YouTube ad blocking", "Removes the ad schedule from the video data, hides ad boxes. Light on battery, no lag", ytShield, v -> { ytShield = v; putBool("ytshield", v); });
         settingSwitch(list, "Remove tracking from links", "utm_*, fbclid, gclid ...", stripLinks, v -> { stripLinks = v; putBool("striplinks", v); });
         settingSwitch(list, "Allow third-party cookies", "Off = websites cannot follow you across sites", thirdPartyCookies, v -> { thirdPartyCookies = v; putBool("thirdcookies", v); applyAllTabs(); });
         settingSwitch(list, "Safe Browsing", "Warn about dangerous sites", safeBrowsing, v -> { safeBrowsing = v; putBool("safebrowsing", v); applyAllTabs(); });
