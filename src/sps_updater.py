@@ -43,7 +43,8 @@ MAX_PAGE_BYTES = 3 * 1024 * 1024
 MAX_INSTALLER_BYTES = 1500 * 1024 * 1024
 LOCK_STALE_SECONDS = 45 * 60
 USER_AGENT = "SPS-Browser-Updater/1"
-SILENT_ARGS = ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS", "/FORCECLOSEAPPLICATIONS", "/RELAUNCH"]
+# /SILENT (not /VERYSILENT): the small progress window stays visible, so the user SEES that the update is running.
+SILENT_ARGS = ["/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS", "/FORCECLOSEAPPLICATIONS", "/RELAUNCH"]
 
 _HEX64 = re.compile(r"^[0-9a-fA-F]{64}$")
 _HEX128 = re.compile(r"^[0-9a-fA-F]{128}$")
@@ -349,15 +350,35 @@ class SpsUpdater:
         self._stop.set()
 
     # ---- installing ----
-    def launch_installer(self, info):
-        """Start the verified installer silently (Windows asks for administrator permission once). True on success."""
+    def _verified_path(self, info):
         path = info.get("path") or ""
         if sys.platform != "win32" or not os.path.isfile(path):
-            return False
-        # re-check at the last possible moment
+            self._log("installer start refused: file missing or not Windows: %r" % path)
+            return None
         if not hmac.compare_digest(sha256_file(path), info["sha256"].lower()) or not verify_signature(info, self.key):
+            self._log("installer start refused: SHA-256 or signature check failed")
+            return None
+        return path
+
+    def launch_installer(self, info):
+        """Start the verified installer (Windows asks for administrator permission once). True on success.
+        The installer writes its own log next to the download (update_install.log) and shows a small progress window."""
+        path = self._verified_path(info)
+        if not path:
             return False
         import ctypes
-        params = " ".join(SILENT_ARGS)
-        rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", path, params, os.path.dirname(path), 0)
+        folder = os.path.dirname(path)
+        params = " ".join(SILENT_ARGS + ['/LOG="%s"' % os.path.join(folder, "update_install.log")])
+        rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", path, params, folder, 1)    # 1 = normal window
+        self._log("installer started via ShellExecute rc=%s args=%s" % (rc, params))
         return rc > 32                                            # <= 32 means the user refused the permission or it failed
+
+    def open_installer_normally(self, info):
+        """Fallback: the normal installer wizard (visible, with its own buttons). Used when the silent start does not work."""
+        path = self._verified_path(info)
+        if not path:
+            return False
+        import ctypes
+        rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", path, None, os.path.dirname(path), 1)
+        self._log("installer wizard started rc=%s" % rc)
+        return rc > 32

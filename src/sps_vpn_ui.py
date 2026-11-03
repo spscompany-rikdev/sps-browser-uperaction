@@ -67,6 +67,7 @@ class SpsVpnDialog(QDialog):
         super().__init__(parent)
         self.m = manager
         self.restart_cb = restart_cb
+        self._sys_busy = False
         self.bus = _Bus()
         self.bus.changed.connect(self.refresh)
         self.setWindowTitle("SPS VPN")
@@ -142,6 +143,7 @@ class SpsVpnDialog(QDialog):
         self.refresh()
 
     def refresh(self):
+        self.btn_sys_off.setEnabled(not self._sys_busy)
         st = self.m.state
         colors = {"off": ("#555", "#eee"), "connecting": ("#8a6d00", "#fff3c4"), "connected": ("#0b6b2a", "#d6f5df"), "error": ("#8a1010", "#fbd9d9")}
         fg, bg = colors.get(st, colors["off"])
@@ -240,23 +242,37 @@ class SpsVpnDialog(QDialog):
         ok, msg = sps_vpn_system.available()
         if not ok:
             QMessageBox.information(self, "SPS VPN", msg); return
+        if sps_vpn_system.is_active(self.m.store.dir):
+            QMessageBox.information(self, "SPS VPN", "The whole-computer VPN is already running."); return
         if QMessageBox.question(self, "Protect whole computer",
                                 "This changes the network settings of the WHOLE computer and needs administrator approval.\n"
                                 "Use 'Stop whole-computer VPN' to undo it.\n\nContinue?") != QMessageBox.StandardButton.Yes:
             return
         try:
-            sps_vpn_system.start(self.m.store.dir, s["conf"])
-            self.m.message = "Whole-computer VPN requested for %s. Check your IP at a 'what is my IP' site." % s["name"]
+            self.m.message = sps_vpn_system.start(self.m.store.dir, s["conf"]) + " Check your IP at a 'what is my IP' site."
         except Exception as e:
             QMessageBox.warning(self, "SPS VPN", "Could not start it: %s" % e)
         self.refresh()
 
     def sys_off(self):
-        try:
-            sps_vpn_system.stop(self.m.store.dir)
-            self.m.message = "Whole-computer VPN stop requested."
-        except Exception as e:
-            QMessageBox.warning(self, "SPS VPN", "Could not stop it: %s" % e)
+        """ONE click stops it. Any further click only says 'already stopped' - WireGuard is not asked again."""
+        if self._sys_busy:
+            self.m.message = "Stopping... please wait."; self.refresh(); return
+        if not sps_vpn_system.is_active(self.m.store.dir):
+            sps_vpn_system.stop(self.m.store.dir)                  # only tidies leftovers (no OS call)
+            QMessageBox.information(self, "SPS VPN", "The whole-computer VPN is already stopped."); return
+        self._sys_busy = True
+        self.btn_sys_off.setEnabled(False)
+        self.m.message = "Stopping the whole-computer VPN... approve the Windows prompt once."
+
+        def work():
+            try:
+                self.m.message = sps_vpn_system.stop(self.m.store.dir)
+            except Exception as e:
+                self.m.message = "Could not stop it: %s" % e
+            finally:
+                self._sys_busy = False
+        self._run(work)
         self.refresh()
 
     def on_enabled(self, v):

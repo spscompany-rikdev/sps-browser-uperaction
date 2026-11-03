@@ -12,6 +12,23 @@ from urllib.parse import urlparse, quote_plus
 # ─────────────────────────────────────────────────────────────────────
 
 # A1. Reopen Closed Window
+
+# ── thread-safe status messages: worker threads must never touch widgets (that caused access violations) ──
+from PyQt6.QtCore import QObject as _SpsQObject, pyqtSignal as _SpsSignal
+
+class _SpsMsgBridge(_SpsQObject):
+    msg = _SpsSignal(str, int)
+
+def _sps_msg_bridge(win):
+    """Create in the GUI thread (before starting a worker thread); the worker then calls bridge.msg.emit(text, ms)."""
+    b = getattr(win, "_sps_msg_bridge_obj", None)
+    if b is None:
+        b = _SpsMsgBridge(win)
+        b.msg.connect(lambda t, ms: win.status.showMessage(t, ms))
+        win._sps_msg_bridge_obj = b
+    return b
+
+
 def _reopen_closed_window(self):
     """Reopen the last closed window (not just tab)."""
     closed = getattr(self.__class__, "_closed_windows", [])
@@ -19,7 +36,7 @@ def _reopen_closed_window(self):
         self.status.showMessage("No recently closed windows", 2000)
         return
     urls_and_titles = closed.pop()
-    win = MainWindow(self.profile_name)
+    win = _sps_keep_window(MainWindow(self.profile_name))
     win.show()
     for url, title in urls_and_titles:
         win.add_new_tab(url, title)
@@ -1001,6 +1018,7 @@ def _check_extension_updates(self):
     if not extensions:
         self.status.showMessage("No extensions to update", 2000); return
     updated = 0
+    _bridge = _sps_msg_bridge(self)
     def _do():
         nonlocal updated
         for ext in extensions:
@@ -1018,7 +1036,7 @@ def _check_extension_updates(self):
                         updated += 1
             except Exception:
                 pass
-        self.status.showMessage(f"Extension update check done: {updated} update(s) available", 3000)
+        _bridge.msg.emit(f"Extension update check done: {updated} update(s) available", 3000)
     threading.Thread(target=_do, daemon=True).start()
     self.status.showMessage("🔄 Checking extension updates…", 2000)
 
@@ -1799,35 +1817,54 @@ def _show_malware_scanner(self):
     KNOWN_BAD_EXTS = {".exe",".bat",".cmd",".ps1",".vbs",".scr"}
     SUSPICIOUS_NAMES = ["inject","hook","steal","keylog","rat","trojan","backdoor","miner"]
 
-    def _do_scan():
-        scan_btn.setEnabled(False)
-        results.clear(); issues = []
-        scan_dirs = [BASE_DATA_DIR]
+    ext_items = []
+    scan_state = {"done": False, "pct": 0, "issues": []}
+
+    def _scan_worker():
+        """Runs in a background thread: it must NOT touch any widget (that crashed the browser with an access violation)."""
+        issues = scan_state["issues"]
         all_files = []
-        for d in scan_dirs:
+        for d in [BASE_DATA_DIR]:
             for root, dirs, files in os.walk(d):
                 for f in files: all_files.append(os.path.join(root, f))
         for i, fpath in enumerate(all_files):
-            pb.setValue(int((i+1)/max(len(all_files),1)*90))
+            scan_state["pct"] = int((i+1)/max(len(all_files),1)*90)
             fname = os.path.basename(fpath).lower()
             ext   = os.path.splitext(fname)[1]
             if ext in KNOWN_BAD_EXTS:
                 issues.append(f"⚠ Suspicious file type: {fpath}")
             if any(bad in fname for bad in SUSPICIOUS_NAMES):
                 issues.append(f"⚠ Suspicious name: {fpath}")
-        # Check extensions
-        for ext_item in self.settings_data.get("extensions",[]):
+        for ext_item in ext_items:
             name = ext_item.get("name","").lower()
             if any(bad in name for bad in SUSPICIOUS_NAMES):
                 issues.append(f"⚠ Suspicious extension name: {ext_item.get('name')}")
-        pb.setValue(100)
-        if issues:
-            results.setText(f"🔴 {len(issues)} issue(s) found:\n\n" + "\n".join(issues))
-        else:
-            results.setText("✅ No suspicious files or extensions found.\nYour browser data looks clean.")
-        scan_btn.setEnabled(True)
+        scan_state["pct"] = 100
+        scan_state["done"] = True
 
-    scan_btn.clicked.connect(lambda: threading.Thread(target=_do_scan, daemon=True).start())
+    scan_timer = QTimer(dlg)
+    scan_timer.setInterval(120)
+
+    def _scan_tick():
+        pb.setValue(scan_state["pct"])
+        if scan_state["done"]:
+            scan_timer.stop()
+            issues = scan_state["issues"]
+            if issues:
+                results.setText(f"🔴 {len(issues)} issue(s) found:\n\n" + "\n".join(issues[:500]))
+            else:
+                results.setText("✅ No suspicious files or extensions found.\nYour browser data looks clean.")
+            scan_btn.setEnabled(True)
+    scan_timer.timeout.connect(_scan_tick)
+
+    def _do_scan():
+        scan_btn.setEnabled(False); results.clear()
+        scan_state.update({"done": False, "pct": 0, "issues": []})
+        ext_items.clear(); ext_items.extend(list(self.settings_data.get("extensions", [])))
+        scan_timer.start()
+        threading.Thread(target=_scan_worker, daemon=True).start()
+
+    scan_btn.clicked.connect(_do_scan)
     lay.addWidget(scan_btn)
     br = QHBoxLayout()
     close_btn = QPushButton("Close")

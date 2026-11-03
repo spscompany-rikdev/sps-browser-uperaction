@@ -10,6 +10,23 @@ import os, json, datetime, html, re, threading, time, subprocess, platform
 # ──────────────────────────────────────────────────────────────
 # 1. BOOKMARK MANAGER  (full window with drag-drop, folders, dupes)
 # ──────────────────────────────────────────────────────────────
+
+# ── thread-safe status messages: worker threads must never touch widgets (that caused access violations) ──
+from PyQt6.QtCore import QObject as _SpsQObject, pyqtSignal as _SpsSignal
+
+class _SpsMsgBridge(_SpsQObject):
+    msg = _SpsSignal(str, int)
+
+def _sps_msg_bridge(win):
+    """Create in the GUI thread (before starting a worker thread); the worker then calls bridge.msg.emit(text, ms)."""
+    b = getattr(win, "_sps_msg_bridge_obj", None)
+    if b is None:
+        b = _SpsMsgBridge(win)
+        b.msg.connect(lambda t, ms: win.status.showMessage(t, ms))
+        win._sps_msg_bridge_obj = b
+    return b
+
+
 def _show_bookmark_manager(self):
     """Full Bookmark Manager — search, folders, rename, delete, duplicate detection, open-all."""
     from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
@@ -217,19 +234,24 @@ def _open_guest_mode(self):
         "Open a Guest window?\n\nAll browsing in Guest mode is private — no history, cookies, or passwords are saved when the window closes.",
         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
     if reply != QMessageBox.StandardButton.Yes: return
+    import tempfile, shutil, atexit
     guest_win = MainWindow.__new__(MainWindow)
     MainWindow.__init__(guest_win, self.profile_name)
-    # Force off-the-record for entire guest window by opening an incognito tab
-    if guest_win.tabs.count() > 0:
-        first = guest_win.tabs.widget(0)
-        if first:
-            try:
-                from PyQt6.QtWebEngineCore import QWebEngineProfile as QWP
-                guest_win._is_guest = True
-            except Exception:
-                pass
-    guest_win.setWindowTitle("👤 Guest Mode — SPS Browser")
-    guest_win.show()
+    _sps_keep_window(guest_win)                       # without a reference Python deletes the window and it vanishes
+    guest_win._is_guest = True                        # no history is written (see _save_history)
+    try:
+        tmp = tempfile.mkdtemp(prefix="sps_guest_")   # empty bookmarks / history for the guest window, removed afterwards
+        guest_win.profile_path = tmp
+        atexit.register(shutil.rmtree, tmp, True)
+        guest_win.browser_profile = guest_win.incognito_profile          # cookies / cache live only in memory
+        for i in reversed(range(guest_win.tabs.count())):
+            guest_win._close_tab(i)
+        guest_win.add_new_tab(QUrl("about:blank"), "Guest")
+        guest_win._refresh_bookmarks_bar()
+    except Exception as ex:
+        print("[SPS guest]", ex)
+    guest_win.setWindowTitle("\U0001F464 Guest Mode \u2014 SPS Browser")
+    guest_win.show(); guest_win.raise_(); guest_win.activateWindow()
     self.status.showMessage("Guest window opened — nothing will be saved", 4000)
 
 # ──────────────────────────────────────────────────────────────
@@ -722,6 +744,7 @@ def _read_aloud(self):
     browser = self.tabs.currentWidget()
     if not browser: return
 
+    _bridge = _sps_msg_bridge(self)
     def _do_read(text):
         try:
             import pyttsx3
@@ -735,9 +758,9 @@ def _read_aloud(self):
                 cmd = f'powershell -Command "Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; $s.SpeakAsync(\\"{safe}\\");"'
                 subprocess.Popen(cmd, shell=True, creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0)
             else:
-                self.status.showMessage("Install pyttsx3 for text-to-speech: pip install pyttsx3", 4000)
+                _bridge.msg.emit("Install pyttsx3 for text-to-speech: pip install pyttsx3", 4000)
         except Exception as e:
-            self.status.showMessage(f"Read aloud failed: {e}", 3000)
+            _bridge.msg.emit(f"Read aloud failed: {e}", 3000)
 
     def _got_text(text):
         if text and text.strip():

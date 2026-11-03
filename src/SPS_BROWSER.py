@@ -2920,7 +2920,7 @@ class BrowserTab(QWebEngineView):
     def _open_new_window(self):
         if self.page()._is_incognito():          # V34: never move a private page into a normal window
             self.main_window.add_new_tab(self.url(), "New Tab", True); return
-        w = MainWindow(CURRENT_PROFILE_NAME); w.show()
+        w = _sps_keep_window(MainWindow(CURRENT_PROFILE_NAME)); w.show()
         w.add_new_tab(self.url())
 
     def _save_page(self):
@@ -4409,12 +4409,27 @@ class ExtensionsDialog(QDialog):
             self.ext_manager.toggle_extension(item.data(Qt.ItemDataRole.UserRole))
             self._refresh_ext_lists(); self.extensions_changed.emit()
 
+    def _ask_restart_after_removal(self):
+        """A removed extension may still be active in open pages until the browser restarts."""
+        box = QMessageBox(self); box.setWindowTitle("Restart needed")
+        box.setText("The extension was removed.\nRestart SPS Browser now to finish removing it from all open pages? Your tabs come back.")
+        now = box.addButton("Restart now", QMessageBox.ButtonRole.AcceptRole); box.addButton("Later", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is now:
+            w = self.parent()
+            try:
+                if w is not None and hasattr(w, "restart_browser"):
+                    w.restart_browser("extension removed")
+            except Exception as ex:
+                _sps_log_exception(type(ex), ex, ex.__traceback__)
+
     def _uninstall_extension(self):
         item = self.ext_list.currentItem()
         if item:
             if QMessageBox.question(self, "Uninstall", f"Uninstall '{item.text().strip()}'?") == QMessageBox.StandardButton.Yes:
                 self.ext_manager.uninstall_extension(item.data(Qt.ItemDataRole.UserRole))
                 self._refresh_ext_lists(); self.extensions_changed.emit()
+                self._ask_restart_after_removal()
 
     def _select_script(self, item):
         self._script_edit_idx = item.data(Qt.ItemDataRole.UserRole)
@@ -4428,6 +4443,7 @@ class ExtensionsDialog(QDialog):
         idx = self.script_list.currentRow()
         if idx >= 0:
             self.ext_manager.remove_script(idx); self._refresh_ext_lists(); self.extensions_changed.emit()
+            self._ask_restart_after_removal()
 
     def _toggle_script_toolbar(self):
         idx = self.script_list.currentRow()
@@ -14065,6 +14081,25 @@ class V32Mixin:
         self._pw_box = box
         box.show()
 
+_SPS_WINDOW_REFS = []
+
+def _sps_keep_window(w):
+    """A top-level window that nothing refers to is garbage-collected by Python and VANISHES (the 'new window sometimes
+    does not appear' bug). Every extra window created in code is registered here."""
+    try:
+        _SPS_WINDOW_REFS[:] = [x for x in _SPS_WINDOW_REFS if x is not None and _sps_alive(x)]
+    except Exception:
+        pass
+    _SPS_WINDOW_REFS.append(w)
+    return w
+
+def _sps_alive(w):
+    try:
+        return w.isVisible() or w.isMinimized()
+    except RuntimeError:                      # the C++ window is already gone
+        return False
+
+
 class MainWindow(V32Mixin, QMainWindow):
     def __init__(self, profile_name="Default"):
         super().__init__()
@@ -15825,7 +15860,7 @@ class MainWindow(V32Mixin, QMainWindow):
                 self.status.showMessage("🕵️ Private tabs cannot be moved to a normal window.", 4000); return
         except Exception: pass
         url=self.tabs.widget(i).url(); self._close_tab(i)
-        w=MainWindow(self.profile_name); w.show(); w.add_new_tab(url)
+        w=_sps_keep_window(MainWindow(self.profile_name)); w.show(); w.add_new_tab(url)
 
     def _close_others(self,keep):
         for i in reversed(range(self.tabs.count())):
@@ -16573,7 +16608,7 @@ class MainWindow(V32Mixin, QMainWindow):
     # ── History ───────────────────────────────
     def _hist_path(self): return os.path.join(self.profile_path,"history.json")
     def _save_history(self,url,title):
-        if not url or url.startswith("about:"): return
+        if not url or url.startswith("about:") or getattr(self, "_is_guest", False): return
         try:
             hist=[]
             if os.path.exists(self._hist_path()):
@@ -17009,21 +17044,23 @@ class MainWindow(V32Mixin, QMainWindow):
         - 1 extension: show its icon directly in toolbar.
         - 2+ extensions: show single 🧩 puzzle button; click → overflow menu listing all.
         """
-        # Remove old extension buttons/actions
-        for btn in getattr(self, "_ext_toolbar_btns", []):
-            try: self.toolbar.removeAction(btn)
-            except: pass
+        # Remove the old buttons. QToolBar has NO removeWidget(): the widget's ACTION must be removed, otherwise every rebuild
+        # leaves the old icons behind and the icons pile up one after another.
+        for act in getattr(self, "_ext_toolbar_actions", []):
+            try: self.toolbar.removeAction(act)
+            except Exception: pass
         for btn in getattr(self, "_ext_toolbar_widgets", []):
-            try: self.toolbar.removeWidget(btn); btn.deleteLater()
-            except: pass
+            try: btn.hide(); btn.setParent(None); btn.deleteLater()
+            except Exception: pass
         self._ext_toolbar_btns = []
         self._ext_toolbar_widgets = []
+        self._ext_toolbar_actions = []
 
         if not self.settings_data.get("extensions_toolbar_visible", True):
             return
 
         exts = self.extension_manager.get_toolbar_extensions()
-        use_overflow = self.settings_data.get("ext_toolbar_overflow", True) and len(exts) >= 2
+        use_overflow = self.settings_data.get("ext_toolbar_overflow", True) and len(exts) > 2      # 3 or more -> one 🧩 button with a drop-down
 
         def _make_ext_btn(icon_text, tooltip, slot, w=36, h=34):
             btn = QPushButton(icon_text)
@@ -17047,16 +17084,16 @@ class MainWindow(V32Mixin, QMainWindow):
                     pos = btn_widget.mapToGlobal(btn_widget.rect().bottomLeft())
                     menu.exec(pos)
             puzzle_btn = _make_ext_btn("🧩", f"{len(exts)} Extensions — click to expand", _show_overflow, 38, 34)
-            self.toolbar.insertWidget(self.menu_btn_action if hasattr(self,'menu_btn_action') else None, puzzle_btn)
+            self._ext_toolbar_actions.append(self.toolbar.insertWidget(self.menu_btn_action if hasattr(self,'menu_btn_action') else None, puzzle_btn))
             self._ext_toolbar_widgets.append(puzzle_btn)
         else:
-            # Individual button per extension (0 or 1)
+            # Individual button per extension (0, 1 or 2)
             for ext in exts:
                 icon = ext.get("icon", "🧩")
                 name = ext.get("name", "Ext")
                 ext_ref = ext
                 btn = _make_ext_btn(icon, f"{name}: {ext.get('description','')}", lambda checked=False, e=ext_ref: self._run_extension(e))
-                self.toolbar.insertWidget(self.menu_btn_action if hasattr(self,'menu_btn_action') else None, btn)
+                self._ext_toolbar_actions.append(self.toolbar.insertWidget(self.menu_btn_action if hasattr(self,'menu_btn_action') else None, btn))
                 self._ext_toolbar_widgets.append(btn)
 
     # ── Cookie Manager ────────────────────────
@@ -18131,7 +18168,7 @@ class MainWindow(V32Mixin, QMainWindow):
 
     def open_new_window(self):
         """Open a fresh browser window."""
-        w = MainWindow(self.profile_name); w.show()
+        w = _sps_keep_window(MainWindow(self.profile_name)); w.show()
 
     def show_source_current(self):
         """View the HTML source of the current page in a new tab."""

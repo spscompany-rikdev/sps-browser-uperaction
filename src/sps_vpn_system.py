@@ -108,16 +108,84 @@ def run(action, path):
         raise RuntimeError((r.stderr or r.stdout or "failed").strip()[-300:])
 
 
+_STOPPING_UNTIL = 0.0
+
+
+def is_active(workdir=None):
+    """True while the whole-computer tunnel exists. Asks the OS WITHOUT administrator rights and WITHOUT starting WireGuard,
+    so a second 'Stop' never produces a WireGuard error window."""
+    try:
+        if IS_WIN:
+            r = subprocess.run(["sc", "query", "WireGuardTunnel$" + TUNNEL], capture_output=True, text=True, timeout=10,
+                               creationflags=0x08000000)          # CREATE_NO_WINDOW
+            return r.returncode == 0                              # 1060 = "service does not exist" = already stopped
+        if sys.platform.startswith("linux"):
+            return os.path.exists("/sys/class/net/" + TUNNEL)
+        if workdir:
+            return os.path.exists(marker_path(workdir))           # macOS: the interface name is not predictable -> our own marker
+    except Exception:
+        pass
+    return False
+
+
+def marker_path(workdir):
+    return os.path.join(workdir, TUNNEL + ".active")
+
+
+def _set_marker(workdir, on):
+    try:
+        if on:
+            open(marker_path(workdir), "w").close()
+        elif os.path.exists(marker_path(workdir)):
+            os.remove(marker_path(workdir))
+    except OSError:
+        pass
+
+
 def start(workdir, conf_text):
+    """Returns a short message. Starting twice does nothing the second time."""
     ok, msg = available()
     if not ok:
         raise RuntimeError(msg)
+    if is_active(workdir):
+        return "The whole-computer VPN is already running."
     run("up", write_conf(workdir, conf_text))
+    _set_marker(workdir, True)
+    return "Whole-computer VPN requested."
 
 
-def stop(workdir):
-    run("down", conf_path(workdir))
+def stop(workdir, wait_seconds=10):
+    """Stops the tunnel with ONE request. Returns a short message.
+    If it is not running (or a stop is already in progress) WireGuard is NOT contacted at all."""
+    import time
+    global _STOPPING_UNTIL
+    if time.time() < _STOPPING_UNTIL:
+        return "The whole-computer VPN is already being stopped - please wait a moment."
+    if not is_active(workdir):
+        _set_marker(workdir, False)
+        _cleanup_conf(workdir)
+        return "The whole-computer VPN is already stopped."
+    _STOPPING_UNTIL = time.time() + wait_seconds + 2
     try:
-        os.remove(conf_path(workdir))                         # the config holds a private key: do not leave it lying around
+        run("down", conf_path(workdir))
+    except Exception:
+        _STOPPING_UNTIL = 0.0
+        raise
+    for _ in range(int(wait_seconds * 2)):                        # the removal runs elevated in the background: wait until it is gone
+        if not is_active(workdir):
+            break
+        time.sleep(0.5)
+    _STOPPING_UNTIL = 0.0
+    if is_active(workdir):
+        return "The stop request was sent, but the tunnel is still shown as running. Wait a few seconds and check again."
+    _set_marker(workdir, False)
+    _cleanup_conf(workdir)
+    return "The whole-computer VPN is stopped."
+
+
+def _cleanup_conf(workdir):
+    try:
+        if os.path.exists(conf_path(workdir)):
+            os.remove(conf_path(workdir))                         # the config holds a private key: do not leave it lying around
     except OSError:
         pass

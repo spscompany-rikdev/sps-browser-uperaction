@@ -312,6 +312,7 @@ class SpsForcedUpdateDialog(QDialog):
         row = QHBoxLayout(); row.addStretch()
         if not self.mandatory:
             later = QPushButton("Later"); later.clicked.connect(self.reject); row.addWidget(later)
+        self.manual = QPushButton("Open installer (manual)"); self.manual.clicked.connect(self._manual); row.addWidget(self.manual)
         self.btn = QPushButton("Update now"); self.btn.setDefault(True)
         self.btn.clicked.connect(self._go); row.addWidget(self.btn)
         lay.addLayout(row)
@@ -327,6 +328,26 @@ class SpsForcedUpdateDialog(QDialog):
         else:
             super().closeEvent(ev)
 
+    def _manual(self):
+        """Shows the normal installer wizard (always works, even if the silent update does not)."""
+        try:
+            ok = self.win._v36_updater().open_installer_normally(self.info)
+        except Exception as e:
+            ok = False; print("[SPS V36] manual installer failed:", e)
+        if ok:
+            self.status.setText("The installer window is open. Follow it; SPS Browser closes now so the files can be replaced.")
+            QApplication.processEvents()
+            QTimer.singleShot(2500, lambda: os._exit(0))
+        else:
+            try:
+                p = self.info.get("path") or ""
+                if p and os.path.isfile(p):
+                    import subprocess
+                    subprocess.Popen(["explorer", "/select,", p])
+            except Exception:
+                pass
+            self.status.setText("Could not start it. The installer file is shown in a folder - double-click it yourself.")
+
     def _go(self):
         self.btn.setEnabled(False)
         self.status.setText("Starting the installer... (Windows may ask for permission once)")
@@ -336,13 +357,13 @@ class SpsForcedUpdateDialog(QDialog):
         except Exception as e:
             ok = False; print("[SPS V36] launch failed:", e)
         if ok:
-            self.status.setText("Installing... SPS Browser will close and open again by itself.")
+            self.status.setText("Installing... a small progress window appears. SPS Browser closes and opens again by itself.")
             QApplication.processEvents()
             # leave quickly so the installer can replace the files
-            QTimer.singleShot(1500, lambda: os._exit(0))
+            QTimer.singleShot(2500, lambda: os._exit(0))
         else:
             self.btn.setEnabled(True)
-            self.status.setText("The update could not start (permission was refused or the file changed). Click Update now to try again.")
+            self.status.setText("The silent update could not start (permission refused or the file changed). Try again, or use \"Open installer (manual)\".")
 
 class SpsUpdateCheckDialog(QDialog):
     """Manual 'Check for Updates'. Always closeable (X, Esc or Cancel), never blocks the browser, shows what is happening,
