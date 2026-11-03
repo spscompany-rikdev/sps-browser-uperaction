@@ -292,3 +292,28 @@ class AndroidUiTests(unittest.TestCase):
         t = self._j("TabsPage.java")
         for needle in ("closeDuplicates", "recentlyClosed", "Pin", "Select tabs", "Sort A to Z"):
             self.assertIn(needle, t)
+
+
+class HelperAutoFetchTests(unittest.TestCase):
+    def test_missing_wireproxy_is_downloaded_not_reported(self):
+        import tempfile, sps_vpn, sps_vpn_fetch
+        d = tempfile.mkdtemp()
+        calls = []
+        orig_find, orig_fetch, orig_dir = sps_vpn.find_helper, sps_vpn_fetch.fetch_wireproxy, sps_vpn.vpn_dir
+        try:
+            sps_vpn.vpn_dir = lambda base=None: d
+            sps_vpn.find_helper = lambda n, e=(): None
+            sps_vpn_fetch.fetch_wireproxy = lambda dest: calls.append(dest) or os.path.join(dest, "wireproxy")
+            self.assertTrue(sps_vpn.ensure_helper("wireproxy").endswith("wireproxy"))
+            self.assertEqual(calls, [os.path.join(d, "bin")])
+            sps_vpn_fetch.fetch_wireproxy = lambda dest: (_ for _ in ()).throw(RuntimeError("offline"))
+            with self.assertRaises(RuntimeError) as cm:
+                sps_vpn.ensure_helper("wireproxy")
+            self.assertIn("could not be downloaded", str(cm.exception))
+        finally:
+            sps_vpn.find_helper, sps_vpn_fetch.fetch_wireproxy, sps_vpn.vpn_dir = orig_find, orig_fetch, orig_dir
+
+    def test_build_is_strict_and_spec_packs_fetcher(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        self.assertIn("--strict", open(os.path.join(root, "tools", "ci_build.py"), encoding="utf-8").read())
+        self.assertIn("sps_vpn_fetch", open(os.path.join(root, "SPS_Browser.spec"), encoding="utf-8").read())

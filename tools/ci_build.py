@@ -70,10 +70,10 @@ def main():
             shutil.copy2(f, os.path.join(folder, "assets"))
 
     step("SPS VPN helper programs (free wireproxy + Tor; optional)")
-    try:
-        subprocess.call([sys.executable, os.path.join(ROOT, "tools", "fetch_vpn_components.py"), folder], timeout=900)
-    except Exception as e:                                       # never fail the build because of an optional download
-        print("::warning::VPN helper download skipped:", e)
+    rc = subprocess.call([sys.executable, os.path.join(ROOT, "tools", "fetch_vpn_components.py"), folder, "--strict"], timeout=900)
+    if rc != 0 and os.environ.get("SPS_VPN_SOFT") != "1":
+        sys.exit("ERROR: the VPN helper programs could not be downloaded (network?). Fix the connection and build again "
+                 "(or set SPS_VPN_SOFT=1 to build anyway - the program then downloads wireproxy itself on first connect).")
 
     step("Self-test of the built program")
     env = dict(os.environ, QT_QPA_PLATFORM="offscreen", QTWEBENGINE_CHROMIUM_FLAGS="--no-sandbox")
