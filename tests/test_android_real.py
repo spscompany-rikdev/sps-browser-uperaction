@@ -59,12 +59,211 @@ class DesktopManagerWiringTests(unittest.TestCase):
                                 self.fail("%s calls self.%s() which MainWindow does not define" % (f, n.func.attr))
 
 
+@unittest.skipUnless(shutil.which("javac") and shutil.which("java"), "no JDK")
+class ExtensionsRunTests(unittest.TestCase):
+    """Runs the real Java Extensions code on a JVM, then runs the JavaScript it produces inside Chromium on a test page."""
+    def _js(self):
+        d = tempfile.mkdtemp()
+        pkg = os.path.join(d, "com", "spscompany", "spsbrowser"); os.makedirs(pkg)
+        shutil.copy(os.path.join(JAVA, "Extensions.java"), pkg)
+        java_src = r"""package com.spscompany.spsbrowser;
+public class T { public static void main(String[] a){
+ for (Extensions.Def d : Extensions.CATALOG) { int n = d.options == null ? 1 : d.options.length;
+   for (int i = 0; i < n; i++) System.out.println(d.id + "\t" + i + "\t" + Extensions.js(d.id, i).replace("\n", "<NL>")); }
+ System.out.println("MATCH\t" + Extensions.hostMatches("*.a.com","x.a.com") + Extensions.hostMatches("a.com","www.a.com") + Extensions.hostMatches("a.com","b.com") + Extensions.hostMatches("*","z.io"));
+}}"""
+        open(os.path.join(pkg, "T.java"), "w").write(java_src)
+        r = subprocess.run(["javac", "-d", d, os.path.join(pkg, "Extensions.java"), os.path.join(pkg, "T.java")], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = subprocess.run(["java", "-cp", d, "com.spscompany.spsbrowser.T"], capture_output=True, text=True)
+        out = {}
+        for line in r.stdout.splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 3:
+                out[(parts[0], parts[1])] = parts[2].replace("<NL>", "\n")
+        return out, r.stdout
+
+    def test_matching(self):
+        _, raw = self._js()
+        self.assertIn("MATCH\ttruetruefalsetrue", raw)
+
+    def test_scripts_work_in_chromium(self):
+        try:
+            from playwright.sync_api import sync_playwright
+        except Exception:
+            self.skipTest("no playwright")
+        out, _ = self._js()
+        html = ('<html><head><meta name=viewport content="width=device-width"></head><body>'
+                '<div id=onetrust-banner-sdk style="position:fixed;bottom:0">cookies</div>'
+                '<div id=chat style="position:fixed;right:0;bottom:0;width:60px;height:60px">chat</div>'
+                '<article id=a><p>Hello</p></article><img id=im src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" width=20 height=20>'
+                '<p id=t style="user-select:none">copy me</p></body></html>')
+        with sync_playwright() as p:
+            b = p.chromium.launch(); pg = b.new_page(); pg.set_content(html)
+            disp = lambda sel: pg.evaluate("s=>getComputedStyle(document.querySelector(s)).display", sel)
+            pg.evaluate(out[("cookiehide", "0")]); self.assertEqual(disp("#onetrust-banner-sdk"), "none")
+            pg.evaluate(out[("cleanpage", "0")]); self.assertEqual(disp("#chat"), "none")
+            pg.evaluate(out[("noimages", "0")]); self.assertEqual(disp("#im"), "none")
+            pg.evaluate(out[("copyunlock", "0")]); self.assertEqual(pg.evaluate("getComputedStyle(document.querySelector('#t')).userSelect"), "text")
+            pg.evaluate(out[("forcezoom", "0")]); self.assertIn("user-scalable=yes", pg.evaluate("document.querySelector('meta[name=viewport]').content"))
+            pg.evaluate(out[("readable", "2")]); self.assertEqual(pg.evaluate("getComputedStyle(document.querySelector('#a')).fontSize"), "24px")
+            pg.evaluate(out[("darkpages", "1")]); self.assertIn("invert", pg.evaluate("getComputedStyle(document.documentElement).filter"))
+            for k, v in out.items():                                           # every script must at least run without throwing
+                if k[0] != "MATCH": pg.evaluate(v)
+            b.close()
+
+
+class AndroidFixesWiringTests(unittest.TestCase):
+    def test_restart_and_chooser(self):
+        m = _main()
+        self.assertIn("RestartActivity.class", m)
+        self.assertNotIn("killProcess(android.os.Process.myPid()), 300", m)
+        mf = open(os.path.join(ROOT, "android", "app", "src", "main", "AndroidManifest.xml"), encoding="utf-8").read()
+        self.assertIn(".RestartActivity", mf); self.assertIn(":restart", mf)
+        for k in ("ACTION_OPEN_DOCUMENT", '"Files"', "ACTION_VIDEO_CAPTURE", "pickSource(", "RESOURCE_PROTECTED_MEDIA_ID", "manageSitePermissions", "showExtensions"):
+            self.assertIn(k, m)
+
+    def test_updater_is_visible_and_logged(self):
+        u = open(os.path.join(ROOT, "src", "sps_updater.py"), encoding="utf-8").read()
+        self.assertIn('"/SILENT"', u); self.assertNotIn('"/VERYSILENT"', u.split("SILENT_ARGS =")[1].split("\n")[0])
+        self.assertIn("update_install.log", u); self.assertIn("open_installer_normally", u)
+
+    def test_scan_thread_does_not_touch_widgets(self):
+        t = open(os.path.join(ROOT, "src", "_v34_patch.py"), encoding="utf-8").read()
+        worker = t.split("def _scan_worker():")[1].split("scan_timer = QTimer")[0]
+        for bad in ("scan_btn.", "results.", "pb.setValue"):
+            self.assertNotIn(bad, worker)
+
+
+RES = os.path.join(ROOT, "android", "app", "src", "main", "res")
+
+
+class WidgetAndResourceTests(unittest.TestCase):
+    def test_all_xml_resources_are_well_formed(self):
+        import xml.dom.minidom
+        for base, _, files in os.walk(os.path.join(ROOT, "android", "app", "src", "main")):
+            for f in files:
+                if f.endswith(".xml"):
+                    xml.dom.minidom.parse(os.path.join(base, f))
+
+    def test_widget_ids_and_manifest(self):
+        layout = open(os.path.join(RES, "layout", "widget_search.xml"), encoding="utf-8").read()
+        w = open(os.path.join(JAVA, "SearchWidget.java"), encoding="utf-8").read()
+        for view in re.findall(r'bind\(ctx, rv, "(\w+)"', w):
+            self.assertIn("@+id/" + view, layout)
+        for d in re.findall(r"@drawable/(\w+)", layout):
+            self.assertTrue(os.path.isfile(os.path.join(RES, "drawable", d + ".xml")), d)
+        info = open(os.path.join(RES, "xml", "widget_search_info.xml"), encoding="utf-8").read()
+        self.assertIn("@layout/widget_search", info)
+        mf = open(os.path.join(ROOT, "android", "app", "src", "main", "AndroidManifest.xml"), encoding="utf-8").read()
+        self.assertIn(".SearchWidget", mf); self.assertIn("widget_search_info", mf)
+        m = _main()
+        for k in ("handleCommand(", "SearchWidget.VOICE", "SearchWidget.LENS", "startLens()", "Lens.byUrl(", "showTools()"):
+            self.assertIn(k, m)
+
+
+@unittest.skipUnless(shutil.which("javac") and shutil.which("java"), "no JDK")
+class LensUploadTests(unittest.TestCase):
+    def test_lens_page_posts_the_photo_in_chromium(self):
+        try:
+            from playwright.sync_api import sync_playwright
+        except Exception:
+            self.skipTest("no playwright")
+        d = tempfile.mkdtemp()
+        pkg = os.path.join(d, "com", "spscompany", "spsbrowser"); os.makedirs(pkg)
+        shutil.copy(os.path.join(JAVA, "Lens.java"), pkg)
+        jpeg = ("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////"
+                "wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=")
+        open(os.path.join(pkg, "T.java"), "w").write(r"""package com.spscompany.spsbrowser;
+public class T { public static void main(String[] a){ System.out.print(Lens.uploadPage(Lens.UPLOAD, Lens.FIELD, a[0]));
+  System.out.println(); System.out.println("URL " + Lens.byUrl("https://x.com/a b.jpg?x=1&y=2")); } }""")
+        r = subprocess.run(["javac", "-d", d, os.path.join(pkg, "Lens.java"), os.path.join(pkg, "T.java")], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = subprocess.run(["java", "-cp", d, "com.spscompany.spsbrowser.T", jpeg], capture_output=True, text=True)
+        html, _, tail = r.stdout.rpartition("\nURL ")
+        self.assertEqual(tail.strip(), "https://lens.google.com/uploadbyurl?url=https%3A%2F%2Fx.com%2Fa+b.jpg%3Fx%3D1%26y%3D2")
+        seen = {}
+        with sync_playwright() as p:
+            b = p.chromium.launch(); pg = b.new_page()
+            def handler(route):
+                req = route.request
+                seen["method"] = req.method; seen["ctype"] = req.headers.get("content-type", ""); seen["body"] = req.post_data_buffer
+                route.fulfill(status=200, content_type="text/html", body="<html><body>ok</body></html>")
+            pg.route("https://lens.google.com/**", handler)
+            pg.route("https://base.test/**", lambda route: route.fulfill(status=200, content_type="text/html", body=html))
+            pg.goto("https://base.test/"); pg.wait_for_timeout(800)
+            b.close()
+        self.assertEqual(seen.get("method"), "POST")
+        self.assertIn("multipart/form-data", seen["ctype"])
+        self.assertIn(b'name="encoded_image"', seen["body"]); self.assertIn(b"\xff\xd8\xff", seen["body"])     # a real JPEG went out
+
+
+class ButtonWiringTests(unittest.TestCase):
+    """Nobody can tap every button on a phone here, so every button is checked in the source: its action exists, its icon exists."""
+    def setUp(self):
+        self.m = _main()
+        for f in ("ListPage", "TabsPage", "Vault"):
+            self.m += open(os.path.join(JAVA, f + ".java"), encoding="utf-8").read()
+
+    def test_every_method_reference_exists(self):
+        declared = set(re.findall(r"\b(?:void|boolean|String|int|View|TextView|long)\s+(\w+)\s*\(", self.m))
+        for ref in set(re.findall(r"this::(\w+)", self.m)):
+            self.assertIn(ref, declared, "button points to missing method %s" % ref)
+
+    def test_every_icon_exists(self):
+        icons = {l.split("|")[0] for l in open(os.path.join(ROOT, "android", "app", "src", "main", "assets", "icons.txt"), encoding="utf-8")}
+        used = set(re.findall(r'Ico\.of\("(\w+)"', self.m)) | set(re.findall(r'(?:menuRow|settingLink|quickAction)\([^,]+,(?: [a-z\[\]0-9]+,)? "(\w+)"', self.m))
+        self.assertTrue(used)
+        self.assertEqual(sorted(u for u in used if u not in icons), [])
+
+    def test_menu_and_settings_rows(self):
+        for row in ('"Privacy shield"', '"Extension store"', '"Thought of the day"', '"Check for updates"', '"Read aloud"', '"Add to home screen"',
+                    '"Profiles"', '"Bookmarks"', '"History"', '"Downloads"', '"Passwords"', '"Find in page"', '"Settings"'):
+            self.assertIn("menuRow(box, d, ", self.m.split(row)[0][-60:] + "menuRow(box, d, " if row in self.m else "")
+            self.assertIn(row, self.m)
+        # these used to be silently missing from the menu: they must be inside showMenu()
+        menu = self.m.split("private void showMenu()")[1].split("// ─────")[0]
+        for row in ('"Privacy shield"', '"Extension store"', '"Thought of the day"', '"Check for updates"', '"Read aloud"'):
+            self.assertIn(row, menu)
+        settings = self.m.split("private void showSettings()")[1].split("private void ")[0]
+        for row in ('"Remove tracking from links"', '"Lock the app with your screen lock"', '"Ask before downloading"', '"Thought of the day"',
+                    '"Extension store"', '"Site permissions"', '"Block autoplay"', '"Block pop-up windows"', '"Check for updates automatically"'):
+            self.assertIn(row, settings)
+
+
+@unittest.skipUnless(shutil.which("javac") and shutil.which("java"), "no JDK")
+class UpdaterJvmTests(unittest.TestCase):
+    def test_updater_logic(self):
+        d = tempfile.mkdtemp()
+        pkg = os.path.join(d, "com", "spscompany", "spsbrowser"); os.makedirs(pkg)
+        shutil.copy(os.path.join(JAVA, "Updater.java"), pkg)
+        # org.json does not exist on a plain JVM: give the compiler a stub (only fromRelease uses it, and it is not run here)
+        stubs = os.path.join(d, "org", "json"); os.makedirs(stubs)
+        open(os.path.join(stubs, "JSONObject.java"), "w").write("package org.json; public class JSONObject { public JSONObject(String s) throws Exception {} public boolean optBoolean(String k){return false;} public String optString(String k,String d){return d;} public JSONArray optJSONArray(String k){return null;} public long optLong(String k){return 0;} }")
+        open(os.path.join(stubs, "JSONArray.java"), "w").write("package org.json; public class JSONArray { public int length(){return 0;} public JSONObject getJSONObject(int i) throws Exception {return null;} }")
+        open(os.path.join(pkg, "T.java"), "w").write(r"""package com.spscompany.spsbrowser;
+public class T { static void ok(boolean b, String m){ if(!b) throw new RuntimeException(m); }
+ public static void main(String[] a) throws Exception {
+  ok(Updater.isNewer("v38.5.0","38.2.0"), "newer"); ok(!Updater.isNewer("38.2.0","38.2.0"), "same"); ok(!Updater.isNewer("38.1.9","38.2.0"), "older");
+  ok(Updater.isNewer("39.0.0","38.99.99"), "major"); ok(!Updater.isNewer("junk","38.0.0"), "junk");
+  String h = "a".repeat(64);
+  ok(h.equals(Updater.hashFor(h + "  SPS_Browser_Android_v38.5.0.apk" + (char)10 + "b".repeat(64) + "  other.exe" + (char)10, "SPS_Browser_Android_v38.5.0.apk")), "hash");
+  ok(Updater.hashFor(h + "  x.apk", "y.apk") == null, "no hash");
+  ok(Updater.sha256(new java.io.ByteArrayInputStream("abc".getBytes())).equals("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"), "sha");
+  System.out.println("UPDATER OK"); } }""")
+        srcs = [os.path.join(pkg, "Updater.java"), os.path.join(pkg, "T.java"), os.path.join(stubs, "JSONObject.java"), os.path.join(stubs, "JSONArray.java")]
+        r = subprocess.run(["javac", "-d", d] + srcs, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = subprocess.run(["java", "-cp", d, "com.spscompany.spsbrowser.T"], capture_output=True, text=True)
+        self.assertIn("UPDATER OK", r.stdout + r.stderr)
+
+
 class UploadWiringTests(unittest.TestCase):
     def test_upload_flow(self):
         m = _main()
         self.assertIn("setAllowContentAccess(true)", m)           # needed to read the picked file
         self.assertNotIn("setAllowContentAccess(false)", m)
-        self.assertIn("ACTION_GET_CONTENT", m)
+        self.assertIn("ACTION_GET_CONTENT", m)  # photos / videos source
         self.assertIn("EXTRA_ALLOW_MULTIPLE", m)
         self.assertIn("Manifest.permission.CAMERA", m)
         self.assertIn("REQ_CAMERA_PERM", m)

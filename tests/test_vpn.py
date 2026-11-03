@@ -228,6 +228,32 @@ class AndroidWorkflowTests(unittest.TestCase):
         self.assertIn("platforms;android-34", wf)
 
 
+class SystemVpnStopTests(unittest.TestCase):
+    """Stopping twice must not contact WireGuard the second time."""
+    def test_second_stop_makes_no_os_call(self):
+        import sps_vpn_system as sv, tempfile
+        d = tempfile.mkdtemp()
+        calls = []
+        sv.is_active = lambda workdir=None: state["on"]
+        sv.run = lambda action, path: (calls.append(action), state.__setitem__("on", False))
+        state = {"on": True}
+        self.assertIn("stopped", sv.stop(d, wait_seconds=1))
+        self.assertEqual(calls, ["down"])                         # exactly one request to the OS
+        self.assertIn("already stopped", sv.stop(d, wait_seconds=1))
+        self.assertIn("already stopped", sv.stop(d, wait_seconds=1))
+        self.assertEqual(calls, ["down"])                         # still one: later clicks never reach WireGuard
+
+    def test_start_twice(self):
+        import sps_vpn_system as sv, tempfile
+        d = tempfile.mkdtemp(); calls = []
+        sv.available = lambda: (True, "")
+        sv.is_active = lambda workdir=None: bool(calls)
+        sv.run = lambda action, path: calls.append(action)
+        sv.start(d, "[Interface]\nPrivateKey=x\n")
+        self.assertIn("already running", sv.start(d, "[Interface]\nPrivateKey=x\n"))
+        self.assertEqual(calls, ["up"])
+
+
 class AndroidUiTests(unittest.TestCase):
     ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "android", "app", "src", "main"))
 
