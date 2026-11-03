@@ -525,6 +525,15 @@ def _v38_export_pdf(self):
     except Exception as e:
         QMessageBox.warning(self, "Export PDF", f"The export window could not open: {e}")
 
+def _v38_print_selected_area(self):
+    try:
+        import sps_print
+        os.environ.setdefault("SPS_DATA_DIR", APP_ROOT_DIR)
+        sps_print.show_print_dialog(self, to_pdf=False, start_area=True)
+    except Exception as e:
+        QMessageBox.warning(self, "Print", f"The print window could not open: {e}")
+
+MainWindow.print_selected_area = _v38_print_selected_area
 MainWindow.print_page = _v38_print_page
 MainWindow.export_pdf = _v38_export_pdf
 
@@ -693,3 +702,40 @@ def _v38_init(self, *a, **k):
 
 
 MainWindow.__init__ = _v38_init
+
+
+# ── V39: Quick panel (rounded drop-down instead of separate windows) ──
+def _v39_quick_panel(self):
+    try:
+        import sps_quick
+        sps_quick.show_quick_panel(self, getattr(self, "menu_btn", None))
+    except Exception as e:
+        QMessageBox.warning(self, "Quick panel", f"Could not open it: {e}")
+
+MainWindow.show_quick_panel = _v39_quick_panel
+
+def _v39_hook_init(_orig=MainWindow.__init__):
+    def _init(self, *a, **k):
+        _orig(self, *a, **k)
+        try:
+            from PyQt6.QtGui import QShortcut, QKeySequence
+            self._quick_sc = QShortcut(QKeySequence("Ctrl+Shift+Space"), self, activated=self.show_quick_panel)
+            btn = QPushButton("⚡"); btn.setFixedSize(36, 36); btn.setToolTip("Quick panel (Ctrl+Shift+Space)")
+            btn.setStyleSheet("QPushButton{background:transparent;border:none;border-radius:18px;font-size:16px;}QPushButton:hover{background:rgba(128,128,128,60);}")
+            btn.clicked.connect(lambda *_: self.show_quick_panel())
+            before = next((a for a in self.toolbar.actions() if self.toolbar.widgetForAction(a) is self.menu_btn), None)
+            self._quick_action = self.toolbar.insertWidget(before, btn) if before is not None else self.toolbar.addWidget(btn)
+            self._quick_btn = btn
+        except Exception as e:
+            print("[SPS V39] quick panel button:", e)
+    return _init
+
+MainWindow.__init__ = _v39_hook_init()
+
+
+# ── V39: dialogs open as rounded drop-downs under the toolbar (special windows stay windows) ──
+try:
+    import sps_dropdown
+    sps_dropdown.install()
+except Exception as _e:
+    print("[SPS V39] dropdown windows not installed:", _e)

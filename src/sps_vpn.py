@@ -27,6 +27,11 @@ def find_helper(name, extra_dirs=()):
     cands = []
     for d in extra_dirs:
         cands += [os.path.join(d, exe), os.path.join(d, name, exe), os.path.join(d, name, "tor", exe)]
+    try:
+        ub = os.path.join(vpn_dir(), "bin")                      # helpers the program downloaded by itself
+        cands += [os.path.join(ub, exe), os.path.join(ub, name, exe), os.path.join(ub, name, "tor", exe)]
+    except Exception:
+        pass
     here = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
     for base in (here, os.path.dirname(here)):
         cands += [os.path.join(base, "vpn", exe), os.path.join(base, "vpn", name, exe), os.path.join(base, "vpn", name, "tor", exe)]
@@ -34,6 +39,29 @@ def find_helper(name, extra_dirs=()):
         if os.path.isfile(c):
             return c
     return shutil.which(name)
+
+
+def ensure_helper(name, helper_dirs=(), log=None):
+    """Path of the helper program; when it is missing it is downloaded once from its official release (never fails silently)."""
+    exe = find_helper(name, helper_dirs)
+    if exe:
+        return exe
+    log = log or (lambda m: None)
+    try:
+        import sps_vpn_fetch
+        log("downloading %s ..." % name)
+        dest = os.path.join(vpn_dir(), "bin")
+        if name == "wireproxy":
+            return sps_vpn_fetch.fetch_wireproxy(dest)
+        if name == "tor":
+            sps_vpn_fetch.fetch_tor(dest)
+            exe = find_helper("tor", helper_dirs)
+            if exe:
+                return exe
+    except Exception as e:
+        raise RuntimeError("The helper '%s' is missing and could not be downloaded automatically (%s). "
+                           "Check your internet connection and try again." % (name, e))
+    raise RuntimeError("The helper '%s' was not found." % name)
 
 
 # ───────────────────────────── helpers ─────────────────────────────
@@ -328,9 +356,7 @@ class Tunnel:
         kind = self.p["kind"]
         self.port = free_port()
         if kind == "wireguard":
-            exe = find_helper("wireproxy", helper_dirs)
-            if not exe:
-                raise RuntimeError("The WireGuard helper (wireproxy) was not found. Put it in the 'vpn' folder next to the browser.")
+            exe = ensure_helper("wireproxy", helper_dirs, self._log)
             conf = os.path.join(self.workdir, "wp_%d.conf" % self.port)
             fd = os.open(conf, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fd, "w") as f:
@@ -342,9 +368,7 @@ class Tunnel:
                 self.stop()
                 raise RuntimeError("The WireGuard tunnel did not start (check the config).")
         elif kind == "tor":
-            exe = find_helper("tor", helper_dirs)
-            if not exe:
-                raise RuntimeError("Tor was not found. Put the Tor files in the 'vpn' folder next to the browser.")
+            exe = ensure_helper("tor", helper_dirs, self._log)
             data = os.path.join(self.workdir, "tor_data")
             os.makedirs(data, exist_ok=True)
             cmd = [exe, "--SocksPort", "127.0.0.1:%d" % self.port, "--DataDirectory", data, "--ClientOnly", "1",

@@ -246,7 +246,7 @@ def _open_guest_mode(self):
         guest_win.browser_profile = guest_win.incognito_profile          # cookies / cache live only in memory
         for i in reversed(range(guest_win.tabs.count())):
             guest_win._close_tab(i)
-        guest_win.add_new_tab(QUrl("about:blank"), "Guest")
+        guest_win.add_new_tab(None, "Guest")           # None = the real (private) New Tab page, not a blank tab
         guest_win._refresh_bookmarks_bar()
     except Exception as ex:
         print("[SPS guest]", ex)

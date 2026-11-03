@@ -151,7 +151,7 @@ class AreaSelector(QWidget):
 
 
 class SpsPrintDialog(QDialog):
-    def __init__(self, win, view, to_pdf=False):
+    def __init__(self, win, view, to_pdf=False, start_area=False):
         super().__init__(win)
         self.win, self.view = win, view
         self.page = view.page()
@@ -189,6 +189,10 @@ class SpsPrintDialog(QDialog):
         form.addRow("Print", self.area)
         self.pick = QPushButton("Choose the area…"); self.pick.setEnabled(False)
         form.addRow("", self.pick)
+        self.save_img = QPushButton("Save the area as a picture…"); self.save_img.setEnabled(False)
+        self.copy_img = QPushButton("Copy the area"); self.copy_img.setEnabled(False)
+        irow = QWidget(); il = QHBoxLayout(irow); il.setContentsMargins(0, 0, 0, 0); il.addWidget(self.save_img); il.addWidget(self.copy_img)
+        form.addRow("", irow)
 
         self.pages_mode = QComboBox(); self.pages_mode.addItems(["All", "Custom"])
         self.pages_text = QLineEdit(); self.pages_text.setPlaceholderText("e.g. 1-3, 5"); self.pages_text.setEnabled(False)
@@ -256,10 +260,15 @@ class SpsPrintDialog(QDialog):
         self.pages_text.textChanged.connect(self._changed)
         self.dest.currentIndexChanged.connect(self._dest_changed)
         self.pick.clicked.connect(self._choose_area)
+        self.save_img.clicked.connect(self._save_picture)
+        self.copy_img.clicked.connect(self._copy_picture)
         self.go.clicked.connect(self._do)
         cancel.clicked.connect(self.reject)
         self._dest_changed()
         self._changed()
+        if start_area:
+            self.area.setCurrentIndex(1)
+            QTimer.singleShot(250, self._choose_area)
 
     # ── settings plumbing ──
     def _dest_changed(self):
@@ -274,6 +283,8 @@ class SpsPrintDialog(QDialog):
         self.pages_text.setEnabled(self.pages_mode.currentIndex() == 1 and self.area.currentIndex() == 0)
         self.pages_mode.setEnabled(self.area.currentIndex() == 0)
         self.pick.setEnabled(self.area.currentIndex() == 1)
+        have = self._pixmap is not None and not self._pixmap.isNull()
+        self.save_img.setEnabled(have); self.copy_img.setEnabled(have)
         if self.area.currentIndex() == 1:
             self.note.setText("Selected area prints the box you drag, exactly as you see it on screen (as a picture).")
         else:
@@ -410,23 +421,52 @@ class SpsPrintDialog(QDialog):
         self.status.setText("%s page%s" % (self._pages or "?", "" if self._pages == 1 else "s"))
 
     # ── selected area ──
+    # The window must NOT be modal while the box is dragged (a modal window blocks the page, and hiding a window that is
+    # inside exec() ends it - that was the "nothing happens after choosing the area" bug). So it is shown with show(), never exec().
     def _choose_area(self):
+        if self._selector is not None:
+            return
+        self.setWindowModality(Qt.WindowModality.NonModal)
         self.hide()
         QApplication.processEvents()
+        try:
+            self.win.raise_(); self.win.activateWindow()
+        except Exception:
+            pass
         self._selector = AreaSelector(self.view)
         self._selector.chosen.connect(self._area_chosen)
         self._selector.cancelled.connect(self._area_cancelled)
 
+    def _back(self):
+        self.setWindowModality(Qt.WindowModality.WindowModal)
+        self.show(); self.raise_(); self.activateWindow()
+
     def _area_cancelled(self):
-        self._selector.deleteLater(); self._selector = None
-        self.show(); self.raise_()
+        if self._selector is not None:
+            self._selector.deleteLater(); self._selector = None
+        self._back()
 
     def _area_chosen(self, rect):
-        self._selector.deleteLater(); self._selector = None
+        if self._selector is not None:
+            self._selector.deleteLater(); self._selector = None
         QApplication.processEvents()
-        self._pixmap = self.view.grab(rect)
-        self.show(); self.raise_()
+        pm = self.view.grab(rect)
+        if pm.isNull():
+            pm = self.win.grab().copy(QRect(self.view.mapTo(self.win, rect.topLeft()), rect.size()))
+        self._pixmap = pm
+        self._back()
         self._changed()
+
+    def _save_picture(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Save the area as a picture", "selection.png", "PNG (*.png);;JPEG (*.jpg)")
+        if path and self._pixmap is not None:
+            if not self._pixmap.save(path):
+                QMessageBox.warning(self, "Save", "The picture could not be saved.")
+
+    def _copy_picture(self):
+        if self._pixmap is not None:
+            QApplication.clipboard().setPixmap(self._pixmap)
+            self.status.setText("The area is copied - paste it anywhere.")
 
     # ── print / save ──
     def _do(self):
@@ -504,9 +544,20 @@ class SpsPrintDialog(QDialog):
         super().done(r)
 
 
-def show_print_dialog(win, to_pdf=False):
+def show_print_dialog(win, to_pdf=False, start_area=False):
     view = win.tabs.currentWidget()
     if view is None or not hasattr(view, "page"):
         QMessageBox.information(win, "Print", "Open a web page first.")
-        return
-    SpsPrintDialog(win, view, to_pdf=to_pdf).exec()
+        return None
+    old = getattr(win, "_sps_print_dlg", None)
+    if old is not None:
+        try:
+            old.close()
+        except Exception:
+            pass
+    dlg = SpsPrintDialog(win, view, to_pdf=to_pdf, start_area=start_area)
+    dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
+    dlg.setWindowModality(Qt.WindowModality.WindowModal)
+    win._sps_print_dlg = dlg                 # keep a reference (a window without one is garbage collected)
+    dlg.show()
+    return dlg

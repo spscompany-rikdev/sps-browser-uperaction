@@ -294,8 +294,8 @@ class SpsVpnDialog(QDialog):
             self.m.store.add(sps_vpn.make_server("wireguard", name, conf=clean, endpoint=info.get("endpoint", "")))
             self.refresh()
             if not sps_vpn.find_helper("wireproxy", self.m.helper_dirs):
-                QMessageBox.information(self, "SPS VPN", "Saved. The WireGuard helper (wireproxy) was not found in the 'vpn' folder yet - "
-                                        "put wireproxy(.exe) there (Open VPN folder) before connecting.")
+                QMessageBox.information(self, "SPS VPN", "Saved. The WireGuard helper (wireproxy) is not installed yet - SPS downloads it "
+                                        "automatically (once, from its official release) the first time you press Connect. Internet is needed for that.")
         except Exception as e:
             QMessageBox.warning(self, "SPS VPN", "That file could not be used: %s" % e)
 
