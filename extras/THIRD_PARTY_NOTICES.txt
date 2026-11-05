@@ -51,3 +51,8 @@ GPL v3 as well (see LICENSE.txt). Everyone who receives the Program may therefor
 SPS VPN helper programs (optional, downloaded unchanged from their official releases at build time)
 - wireproxy - ISC licence - https://github.com/pufferffish/wireproxy
 - Tor expert bundle - BSD 3-clause licence - https://www.torproject.org
+
+----------------------------------------------------------------------
+QR Code generator library (Java) - Project Nayuki, MIT License - https://www.nayuki.io/page/qr-code-generator-library  (Android app)
+jsQR 1.4.0 - Cosmo Wolfe, Apache License 2.0 - https://github.com/cozmo/jsQR  (Android app: reads QR codes from photos)
+segno 1.6.6 - Lars Heuer, BSD 3-Clause License - https://github.com/heuer/segno  (desktop: draws QR codes for "Send tab")
