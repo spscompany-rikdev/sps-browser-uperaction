@@ -52,7 +52,10 @@ def fetch_wireproxy(dest_dir):
     if not osn:
         raise RuntimeError("unsupported system")
     exe = "wireproxy.exe" if osn == "windows" else "wireproxy"
-    names = ["wireproxy_%s_%s.tar.gz" % (osn, arch), "wireproxy_%s_%s.zip" % (osn, arch)]
+    archs = [arch] + (["amd64"] if (osn == "windows" and arch == "arm64") else [])     # Windows on ARM runs x64 programs
+    names = []
+    for a in archs:
+        names += ["wireproxy_%s_%s.tar.gz" % (osn, a), "wireproxy_%s_%s.zip" % (osn, a)]
     errors, blob = [], None
     for repo in WIREPROXY_REPOS:
         for n in names:
@@ -67,8 +70,8 @@ def fetch_wireproxy(dest_dir):
         for repo in WIREPROXY_REPOS:
             try:
                 rel = json.loads(_get("https://api.github.com/repos/%s/releases/latest" % repo))
-                want = "wireproxy_%s_%s" % (osn, arch)
-                a = next(a for a in rel["assets"] if a["name"].startswith(want) and a["name"].endswith((".tar.gz", ".zip")))
+                a = next(a for ar in archs for a in rel["assets"]
+                         if a["name"].startswith("wireproxy_%s_%s" % (osn, ar)) and a["name"].endswith((".tar.gz", ".zip")))
                 blob = _extract_member(_get(a["browser_download_url"], 180), a["name"], exe)
                 break
             except Exception as e:
@@ -92,9 +95,16 @@ def fetch_tor(dest_dir):
     ver = json.loads(_get("https://aus1.torproject.org/torbrowser/update_3/release/downloads.json"))["version"]
     if not re.match(r"^[0-9.]+$", ver):
         raise RuntimeError("unexpected Tor version string")
-    name = "tor-expert-bundle-%s-%s-%s.tar.gz" % (tor_os, tor_arch, ver)
     base = "https://dist.torproject.org/torbrowser/%s/" % ver
-    data = _get(base + name, 300)
+    name, data = None, None
+    for ta in [tor_arch] + (["x86_64"] if osn == "windows" and tor_arch == "aarch64" else []):   # no ARM Windows build: x64 runs emulated
+        name = "tor-expert-bundle-%s-%s-%s.tar.gz" % (tor_os, ta, ver)
+        try:
+            data = _get(base + name, 300, 2); break
+        except Exception as e:
+            err = e
+    if data is None:
+        raise err
     sums = _get(base + "sha256sums-signed-build.txt").decode("utf-8", "replace")
     expect = next((l.split()[0] for l in sums.splitlines() if l.strip().endswith(name)), None)
     if not expect:
@@ -120,10 +130,15 @@ def fetch_wireguard_msi(dest_dir):
     if not sys.platform.startswith("win"):
         raise RuntimeError("only needed on Windows")
     listing = _get("https://download.wireguard.com/windows-client/").decode("utf-8", "replace")
-    names = sorted(set(re.findall(r'wireguard-amd64-(\d+(?:\.\d+)*)\.msi', listing)), key=lambda v: [int(x) for x in v.split(".")])
+    flavours = ["arm64", "amd64"] if platform_tag()[1] == "arm64" else ["amd64"]   # the ARM driver is preferred on Windows on ARM
+    names = []
+    for flavour in flavours:
+        names = sorted(set(re.findall(r'wireguard-%s-(\d+(?:\.\d+)*)\.msi' % flavour, listing)), key=lambda v: [int(x) for x in v.split(".")])
+        if names:
+            break
     if not names:
         raise RuntimeError("no WireGuard MSI found in the listing")
-    fn = "wireguard-amd64-%s.msi" % names[-1]
+    fn = "wireguard-%s-%s.msi" % (flavour, names[-1])
     os.makedirs(dest_dir, exist_ok=True)
     with open(os.path.join(dest_dir, fn), "wb") as f:
         f.write(_get("https://download.wireguard.com/windows-client/" + fn, 300))

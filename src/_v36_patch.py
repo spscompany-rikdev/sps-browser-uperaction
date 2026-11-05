@@ -739,3 +739,53 @@ try:
     sps_dropdown.install()
 except Exception as _e:
     print("[SPS V39] dropdown windows not installed:", _e)
+
+
+# ── V39b: Safety Check, Send tab (QR), Energy saver ──
+def _v39_safety(self):
+    try:
+        import sps_safety_ui
+        sps_safety_ui.show_safety_check(self, VERSION)
+    except Exception as e:
+        QMessageBox.warning(self, "Safety Check", f"Could not open it: {e}")
+
+def _v39_send_tab(self):
+    try:
+        import sps_qr
+        sps_qr.show_send_tab(self)
+    except ImportError:
+        QMessageBox.information(self, "Send tab", "The QR part needs the 'segno' package (pip install segno). You can still copy the link.")
+        w = self.tabs.currentWidget()
+        if w is not None: QApplication.clipboard().setText(w.url().toString())
+    except Exception as e:
+        QMessageBox.warning(self, "Send tab", f"Could not open it: {e}")
+
+MainWindow.show_safety_check = _v39_safety
+MainWindow.show_send_tab = _v39_send_tab
+
+def _v39b_hook_init(_orig=MainWindow.__init__):
+    def _init(self, *a, **k):
+        _orig(self, *a, **k)
+        try:
+            import sps_perf
+            sps_perf.install(self)
+        except Exception as e:
+            print("[SPS V39] energy saver:", e)
+    return _init
+
+MainWindow.__init__ = _v39b_hook_init()
+
+
+# ── V40: Chrome-style icons, animations everywhere, scrollable windows, rotating ⋮ -> SPS logo, Easy-access button ──
+def _v40_hook_init(_orig=MainWindow.__init__):
+    def _init(self, *a, **k):
+        _orig(self, *a, **k)
+        try:
+            import sps_icons, sps_anim, sps_easy
+            sps_anim.install(self)
+            sps_easy.install(self)
+        except Exception as e:
+            print("[SPS V40] icons/animation/easy access:", e)
+    return _init
+
+MainWindow.__init__ = _v40_hook_init()

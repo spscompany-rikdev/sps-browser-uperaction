@@ -257,6 +257,7 @@ DEFAULT_SETTINGS = {
     "local_remote_access":     False,
     "xss_auditing":            True,
     "ad_blocker":              True,
+    "animations":              True,   # V40: fade/slide animations for menus, windows, drop-downs
     "dropdown_windows":        True,   # V39: dialogs open as rounded drop-downs under the toolbar
     "tracking_protection":     True,
     "total_cookie_protection": True,
@@ -469,6 +470,7 @@ DEFAULT_SETTINGS = {
     "tab_sleep_enabled":         True,
     "tab_sleep_minutes":         15,
     "memory_saver":              True,
+    "energy_saver":              False,   # V39: freeze background tabs
     "smooth_scroll":             True,
     "scroll_to_top_btn":         True,
     "screenshot_tool_v2":        True,
@@ -1559,9 +1561,9 @@ SPS_YT_SKIP_JS = r"""
     host.appendChild(s);
     return true;
   }
-  if (!addCss()) {
-    var mo = new MutationObserver(function () { if (addCss()) mo.disconnect(); });
-    mo.observe(document, { childList: true, subtree: true });
+  if (!addCss()) {                       // <head> does not exist yet at document start: retry a few times, no page-wide observer
+    var tries = 0;
+    (function retry() { if (!addCss() && ++tries < 40) setTimeout(retry, 25); })();
   }
   document.addEventListener('DOMContentLoaded', addCss);
 
@@ -6093,6 +6095,7 @@ class SettingsDialog(QDialog):
         self._add_toggle(g,"tab_preview_hover","Tab preview on hover","Show page thumbnail when hovering over tabs")
         self._add_toggle(g,"confirm_before_close","Confirm before closing","Ask before the browser exits")
         self._add_toggle(g,"enable_tab_groups","Enable tab groups","Allow workspaces and tab groups to be saved")
+        self._add_toggle(g,"animations","Animations","Menus, windows and drop-downs fade/slide in, buttons pulse, the ⋮ button spins into the SPS logo (restart to apply fully)")
         self._add_toggle(g,"dropdown_windows","Drop-down windows","Most windows (VPN, downloads, passwords ...) open as a rounded drop-down under the toolbar, like Chrome")
         self._add_toggle(g,"new_tab_show_search","New tab search box","Show the search bar on the about:newtab dashboard")
         self._add_toggle(g,"new_tab_show_tools","New tab quick tools","Show browser tool shortcuts on the new tab page")
@@ -6533,6 +6536,7 @@ class SettingsDialog(QDialog):
         self._add_toggle(g_v31, "newtab_show_todo",      "Quick To-Do on new tab",            "Mini to-do list on the new tab page")
         self._add_toggle(g_v31, "smooth_scroll",         "Smooth scrolling",                  "CSS smooth-scroll on all pages")
         self._add_toggle(g_v31, "word_highlight",        "Double-click word highlight",       "Highlight all occurrences of a double-clicked word")
+        self._add_toggle(g_v31, "energy_saver",          "Energy saver",                      "Freeze background tabs (no scripts run) to save battery; the tab wakes when you open it")
         self._add_toggle(g_v31, "tab_sleep_enabled",     "Tab sleep (memory saver)",          "Discard inactive tabs after N minutes")
         self._add_toggle(g_v31, "night_shift_enabled",   "Night shift (blue light filter)",   "Orange tint to reduce eye strain at night")
         self._add_toggle(g_v31, "always_on_top",         "Always on top",                     "Keep browser window above all other windows")
@@ -15571,6 +15575,8 @@ class MainWindow(V32Mixin, QMainWindow):
         add("Developer Tools", self.open_dev_tools, "Inspect the current page", "Page", "devtools inspect")
         add("View Source", self.view_source, "Open the page source", "Page", "source html")
         add("Print Page", self.print_page, "Print the current page", "Page", "print")
+        add("Safety Check", self.show_safety_check, "Leaked passwords, extensions, version, protection", "Privacy", "safety check passwords leaked security")
+        add("Send Tab (QR)", self.show_send_tab, "Show a QR code / link of this tab", "Page", "send tab qr share phone")
         add("Print Selected Area", self.print_selected_area, "Drag a box and print only that part", "Page", "print area select crop")
         add("Save Page", self.save_page, "Save the current page to disk", "Page", "save")
         add("Screenshot", self.take_screenshot, "Capture the current tab", "Page", "screenshot capture")
@@ -17504,6 +17510,8 @@ class MainWindow(V32Mixin, QMainWindow):
         m.addAction("🛡 SPS VPN…", lambda: self._safe_call(self._v39_open_vpn) if hasattr(self,"_v39_open_vpn") else None)
         m.addAction("🖨️ Print (Ctrl+P)",       self.print_page)
         m.addAction("✂️ Print selected area…",  lambda: self._safe_call(self.print_selected_area))
+        m.addAction("✅ Safety Check…",          lambda: self._safe_call(self.show_safety_check))
+        m.addAction("📲 Send tab (QR / link)…",  lambda: self._safe_call(self.show_send_tab))
         m.addAction("💾 Save Page (Ctrl+S)",   self.save_page)
         m.addSeparator()
         m.addAction("📸 Screenshot",            self.take_screenshot)

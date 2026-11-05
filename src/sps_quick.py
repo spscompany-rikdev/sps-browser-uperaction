@@ -11,14 +11,16 @@ from PyQt6.QtWidgets import (QFrame, QVBoxLayout, QHBoxLayout, QLabel, QPushButt
                              QGraphicsDropShadowEffect, QApplication)
 
 TOGGLES = [("ad_blocker", "🛡 Ads"), ("youtube_ad_skip", "▶ YouTube ads"), ("tracking_protection", "👁 Trackers"),
-           ("https_only", "🔒 HTTPS only"), ("block_popups", "🚫 Pop-ups")]
+           ("https_only", "🔒 HTTPS only"), ("block_popups", "🚫 Pop-ups"), ("tab_sleep_enabled", "😴 Memory saver"),
+           ("energy_saver", "🔋 Energy saver")]
 
 TOOLS = [("➕", "New tab", "add_new_tab", ()), ("🕵", "Private", "add_new_tab", {"incognito": True}),
          ("🖨", "Print", "print_page", ()), ("✂", "Print area", "print_selected_area", ()),
          ("📸", "Screenshot", "take_screenshot", ()), ("🔎", "SPS Lens", "open_sps_lens", ()),
          ("🕒", "History", "show_history", ()), ("⭐", "Bookmarks", "show_bookmarks", ()),
          ("🍪", "Cookies", "show_cookie_manager", ()), ("🗂", "Tabs", "show_tab_organizer", ()),
-         ("🛰", "VPN", "_v39_open_vpn", ()), ("⚙", "Settings", "show_settings", ())]
+         ("🛰", "VPN", "_v39_open_vpn", ()), ("⚙", "Settings", "show_settings", ()),
+         ("✅", "Safety Check", "show_safety_check", ()), ("📲", "Send tab", "show_send_tab", ())]
 
 
 def _read_list(path):
@@ -60,10 +62,17 @@ class QuickPanel(QFrame):
         s = QLabel("PROTECTION"); s.setObjectName("s"); lay.addWidget(s)
         row = QGridLayout(); row.setSpacing(6); self.toggle_btns = {}
         for i, (key, label) in enumerate(TOGGLES):
-            b = QPushButton(label); b.setCheckable(False); b.setProperty("on", bool(mw.settings_data.get(key, key == "youtube_ad_skip")))
+            b = QPushButton(label); b.setCheckable(False); b.setProperty("on", bool(mw.settings_data.get(key, key in ("youtube_ad_skip", "tab_sleep_enabled"))))
             b.clicked.connect(lambda _=False, k=key, bb=b: self._flip(k, bb)); self.toggle_btns[key] = b
             row.addWidget(b, i // 3, i % 3)
         lay.addLayout(row)
+
+        self.perf = QLabel(); self.perf.setObjectName("s"); lay.addWidget(self.perf)
+        prow = QHBoxLayout(); prow.setSpacing(6)
+        self.sleep_btn = QPushButton("😴 Sleep other tabs now"); self.sleep_btn.clicked.connect(self._sleep_now); prow.addWidget(self.sleep_btn)
+        self.mins_btn = QPushButton(); self.mins_btn.clicked.connect(self._cycle_minutes); prow.addWidget(self.mins_btn)
+        lay.addLayout(prow)
+        self._perf_text()
 
         s = QLabel("TOOLS"); s.setObjectName("s"); lay.addWidget(s)
         g = QGridLayout(); g.setSpacing(6)
@@ -108,10 +117,39 @@ class QuickPanel(QFrame):
             self.il.addWidget(QLabel("Nothing here yet." if not q else "No match."))
         self.il.addStretch(1)
 
+    def _perf_text(self):
+        try:
+            import sps_perf
+            mem = sps_perf.memory_mb()
+            self.perf.setText("PERFORMANCE   ·   %d tabs   ·   %d sleeping%s" % (self.mw.tabs.count(), sps_perf.sleeping_count(self.mw),
+                                                                       ("   ·   %d MB" % mem) if mem else ""))
+            self.mins_btn.setText("⏱ Sleep after %d min" % int(self.mw.settings_data.get("tab_sleep_minutes", 15)))
+        except Exception as e:
+            self.perf.setText("PERFORMANCE")
+
+    def _sleep_now(self):
+        try:
+            import sps_perf
+            n = sps_perf.sleep_others_now(self.mw)
+            self.mw.status.showMessage("%d tab(s) put to sleep" % n, 3000)
+        except Exception as e:
+            print("[SPS quick] sleep:", e)
+        self._perf_text()
+
+    def _cycle_minutes(self):
+        try:
+            import sps_perf
+            cur = int(self.mw.settings_data.get("tab_sleep_minutes", 15))
+            nxt = next((m for m in sps_perf.SLEEP_CHOICES if m > cur), sps_perf.SLEEP_CHOICES[0])
+            self.mw.v32_apply_setting("tab_sleep_minutes", nxt)
+        except Exception as e:
+            print("[SPS quick] minutes:", e)
+        self._perf_text()
+
     # ---- actions ----
     def _flip(self, key, btn):
         try:
-            new = not bool(self.mw.settings_data.get(key, key == "youtube_ad_skip"))
+            new = not bool(self.mw.settings_data.get(key, key in ("youtube_ad_skip", "tab_sleep_enabled")))
             self.mw.v32_apply_setting(key, new)
             btn.setProperty("on", new); btn.style().unpolish(btn); btn.style().polish(btn)
             try:
