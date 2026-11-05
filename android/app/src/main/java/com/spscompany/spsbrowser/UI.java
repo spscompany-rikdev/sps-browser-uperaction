@@ -180,6 +180,10 @@ final class UI {
         sv.addView(content);
         wrap.addView(sv, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         d.setContentView(wrap);
+        d.setOnShowListener(x -> {                                         // slide up + fade, like Chrome's bottom sheets
+            wrap.setTranslationY(dp(a, 90)); wrap.setAlpha(0f);
+            wrap.animate().translationY(0f).alpha(1f).setDuration(220).setInterpolator(new android.view.animation.DecelerateInterpolator(1.6f)).start();
+        });
         Window w = d.getWindow();
         if (w != null) {
             w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));

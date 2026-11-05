@@ -20,13 +20,25 @@ public class SearchWidget extends AppWidgetProvider {
         if (layout == 0) return;
         for (int id : ids) {
             RemoteViews rv = new RemoteViews(pkg, layout);
-            bind(ctx, rv, "w_pill", SEARCH, 1);
-            bind(ctx, rv, "w_text", SEARCH, 1);
-            bind(ctx, rv, "w_search", SEARCH, 1);
-            bind(ctx, rv, "w_mic", VOICE, 2);
-            bind(ctx, rv, "w_lens", LENS, 3);
-            mgr.updateAppWidget(id, rv);
+            try {                                           // a broken tap target must never stop the widget from showing
+                bind(ctx, rv, "w_pill", SEARCH, 1);
+                bind(ctx, rv, "w_text", SEARCH, 1);
+                bind(ctx, rv, "w_search", SEARCH, 1);
+                bind(ctx, rv, "w_mic", VOICE, 2);
+                bind(ctx, rv, "w_lens", LENS, 3);
+            } catch (Throwable ignored) { }
+            try { mgr.updateAppWidget(id, rv); } catch (Throwable ignored) { }
         }
+    }
+
+    /** Asks the launcher to place the widget (Android 8+). Returns false when the launcher cannot do that. */
+    static boolean requestPin(Context ctx) {
+        try {
+            if (Build.VERSION.SDK_INT < 26) return false;
+            AppWidgetManager m = AppWidgetManager.getInstance(ctx);
+            if (!m.isRequestPinAppWidgetSupported()) return false;
+            return m.requestPinAppWidget(new android.content.ComponentName(ctx, SearchWidget.class), null, null);
+        } catch (Throwable e) { return false; }
     }
 
     private static void bind(Context ctx, RemoteViews rv, String viewName, String command, int code) {

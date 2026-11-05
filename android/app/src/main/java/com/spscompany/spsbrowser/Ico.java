@@ -41,7 +41,15 @@ final class Ico extends Drawable {
         return new Ico(d == null ? "" : d, color);
     }
 
+    private final float[][] svg;
+
     private Ico(String def, int color) {
+        float[][] sv = null;
+        if (def.startsWith("S ")) {
+            try { sv = SvgPath.parse(def.substring(2)); } catch (RuntimeException ignored) { sv = new float[0][]; }
+            def = "";
+        }
+        svg = sv;
         toks = def.trim().isEmpty() ? new String[0] : def.trim().split("\\s+");
         stroke.setStyle(Paint.Style.STROKE);
         stroke.setStrokeCap(Paint.Cap.ROUND);
@@ -72,6 +80,20 @@ final class Ico extends Drawable {
         canvas.save();
         canvas.translate(b.left, b.top);
         canvas.scale(b.width() / 24f, b.height() / 24f);
+        if (svg != null) {
+            Path sp = new Path();
+            for (float[] o : svg) {
+                switch ((int) o[0]) {
+                    case SvgPath.MOVE: sp.moveTo(o[1], o[2]); break;
+                    case SvgPath.LINE: sp.lineTo(o[1], o[2]); break;
+                    case SvgPath.CUBIC: sp.cubicTo(o[1], o[2], o[3], o[4], o[5], o[6]); break;
+                    default: sp.close(); break;
+                }
+            }
+            canvas.drawPath(sp, fill);
+            canvas.restore();
+            return;
+        }
         Path path = new Path();
         boolean filled = false;
         String prev = "";

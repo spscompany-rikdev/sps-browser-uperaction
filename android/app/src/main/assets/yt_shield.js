@@ -20,9 +20,9 @@
     host.appendChild(s);
     return true;
   }
-  if (!addCss()) {
-    var mo = new MutationObserver(function () { if (addCss()) mo.disconnect(); });
-    mo.observe(document, { childList: true, subtree: true });
+  if (!addCss()) {                       // <head> does not exist yet at document start: retry a few times, no page-wide observer
+    var tries = 0;
+    (function retry() { if (!addCss() && ++tries < 40) setTimeout(retry, 25); })();
   }
   document.addEventListener('DOMContentLoaded', addCss);
 

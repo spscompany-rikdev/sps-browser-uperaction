@@ -43,7 +43,7 @@
         </activity>
         <receiver
             android:name=".SearchWidget"
-            android:exported="false"
+            android:exported="true"
             android:label="SPS search">
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />

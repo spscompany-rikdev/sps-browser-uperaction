@@ -50,6 +50,10 @@ final class TabsPage extends LinearLayout implements Page {
     private String query = "";
     private final Set<BTab> selected = new HashSet<>();
     private EditText searchBox;
+    private final Set<String> collapsed = new HashSet<>();
+    static final int[] GROUP_COLORS = {0xFF1A73E8, 0xFFD93025, 0xFF188038, 0xFFF29900, 0xFF9334E6, 0xFF12B5CB, 0xFFE52592, 0xFF5F6368};
+
+    static int groupColor(String g) { return GROUP_COLORS[Math.abs(g.hashCode()) % GROUP_COLORS.length]; }
 
     TabsPage(Host h, Ops o) {
         super(h.act());
@@ -103,7 +107,10 @@ final class TabsPage extends LinearLayout implements Page {
         }
         List<BTab> sorted = new ArrayList<>();
         for (BTab t : l) if (t.pinned) sorted.add(t);
-        for (BTab t : l) if (!t.pinned) sorted.add(t);
+        List<String> order = new ArrayList<>();                     // groups stay together, in the order they first appear
+        for (BTab t : l) if (!t.pinned && t.group != null && !order.contains(t.group)) order.add(t.group);
+        for (String g : order) for (BTab t : l) if (!t.pinned && g.equals(t.group)) sorted.add(t);
+        for (BTab t : l) if (!t.pinned && t.group == null) sorted.add(t);
         return sorted;
     }
 
@@ -122,33 +129,126 @@ final class TabsPage extends LinearLayout implements Page {
             content.addView(t);
             return;
         }
-        boolean hasPinned = false;
-        for (BTab t : tabs) if (t.pinned) hasPinned = true;
+        // build the list of things to draw: group headers + the tabs that are not hidden by a collapsed group
+        List<Object> items = new ArrayList<>();
+        String lastGroup = null;
+        for (BTab t : tabs) {
+            String g = t.pinned ? null : t.group;
+            if (g != null && !g.equals(lastGroup)) items.add(g);
+            lastGroup = g;
+            if (g == null || !collapsed.contains(g)) items.add(t);
+        }
         if (grid) {
             DisplayMetrics dm = c.getResources().getDisplayMetrics();
             int cardW = (dm.widthPixels - UI.dp(c, 10 * 2 + 10)) / 2;
             LinearLayout rowL = null;
-            for (int i = 0; i < tabs.size(); i++) {
-                if (i % 2 == 0) {
+            int col = 0;
+            for (Object it : items) {
+                if (it instanceof String) {
+                    rowL = null; col = 0;
+                    LayoutParams hp = new LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                    hp.bottomMargin = UI.dp(c, 8);
+                    content.addView(groupHeader((String) it), hp);
+                    continue;
+                }
+                if (col % 2 == 0) {
                     rowL = new LinearLayout(c);
                     LayoutParams rp = new LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
                     rp.bottomMargin = UI.dp(c, 10);
                     content.addView(rowL, rp);
                 }
-                View card = gridCard(tabs.get(i), cardW);
+                View card = gridCard((BTab) it, cardW);
                 LayoutParams cp = new LayoutParams(cardW, UI.dp(c, 200));
-                if (i % 2 == 0) cp.rightMargin = UI.dp(c, 10);
+                if (col % 2 == 0) cp.rightMargin = UI.dp(c, 10);
                 rowL.addView(card, cp);
+                col++;
             }
         } else {
-            for (BTab t : tabs) {
-                View r = listRow(t);
+            for (Object it : items) {
+                View r = it instanceof String ? groupHeader((String) it) : listRow((BTab) it);
                 LayoutParams lp = new LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
                 lp.bottomMargin = UI.dp(c, 8);
                 content.addView(r, lp);
             }
         }
     }
+
+    // ───────────── tab groups ─────────────
+    private int groupSize(String g) {
+        int n = 0;
+        for (BTab t : ops.tabs()) if (g.equals(t.group) && t.priv == showPrivate) n++;
+        return n;
+    }
+
+    private View groupHeader(final String g) {
+        LinearLayout h = new LinearLayout(c);
+        h.setGravity(Gravity.CENTER_VERTICAL);
+        h.setPadding(UI.dp(c, 12), UI.dp(c, 8), UI.dp(c, 12), UI.dp(c, 8));
+        h.setBackground(UI.box(c, (groupColor(g) & 0x00FFFFFF) | 0x22000000, 14, 0));
+        View dot = new View(c);
+        dot.setBackground(UI.box(c, groupColor(g), 8, 0));
+        h.addView(dot, new LayoutParams(UI.dp(c, 14), UI.dp(c, 14)));
+        boolean closed = collapsed.contains(g);
+        TextView t = UI.oneLine(c, g + "  ·  " + groupSize(g) + (groupSize(g) == 1 ? " tab" : " tabs"), 14, UI.TEXT, true);
+        t.setPadding(UI.dp(c, 10), 0, 0, 0);
+        h.addView(t, new LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        h.addView(UI.text(c, closed ? "▸" : "▾", 18, UI.TEXT2, true));
+        h.setClickable(true);
+        h.setOnClickListener(v -> { if (!collapsed.remove(g)) collapsed.add(g); render(); });
+        h.setOnLongClickListener(v -> { groupMenu(g); return true; });
+        return h;
+    }
+
+    private List<BTab> membersOf(String g) {
+        List<BTab> l = new ArrayList<>();
+        for (BTab t : ops.tabs()) if (g.equals(t.group) && t.priv == showPrivate) l.add(t);
+        return l;
+    }
+
+    private void groupMenu(final String g) {
+        LinearLayout box = new LinearLayout(c);
+        box.setOrientation(VERTICAL);
+        final Dialog[] d = new Dialog[1];
+        addSheetRow(box, d, "Rename group", "edit", () -> askGroupName(g, name -> { for (BTab t : membersOf(g)) t.group = name; render(); }));
+        addSheetRow(box, d, "Open all tabs of this group as a share list", "share", () -> {
+            StringBuilder sb = new StringBuilder(g).append("\n");
+            for (BTab t : membersOf(g)) if (t.url.startsWith("http")) sb.append(t.url).append("\n");
+            host.share(sb.toString().trim());
+        });
+        addSheetRow(box, d, "Ungroup", "close", () -> { for (BTab t : membersOf(g)) t.group = null; render(); });
+        addSheetRow(box, d, "Close group", "trash", () -> { for (BTab t : membersOf(g)) ops.close(t); render(); });
+        d[0] = UI.sheet(host.act(), box);
+        d[0].show();
+    }
+
+    private interface Named { void got(String name); }
+
+    private void askGroupName(String initial, final Named cb) {
+        final EditText in = new EditText(c);
+        in.setSingleLine(true);
+        in.setText(initial == null ? "" : initial);
+        in.setHint("Group name (for example Work, Shopping)");
+        new AlertDialog.Builder(host.act()).setTitle("Group name").setView(in)
+                .setPositiveButton("OK", (dd, w) -> { String n = in.getText().toString().trim(); if (!n.isEmpty()) cb.got(n.length() > 24 ? n.substring(0, 24) : n); })
+                .setNegativeButton("Cancel", null).show();
+    }
+
+    /** Puts the given tabs in a new or an existing group (or takes them out). */
+    private void groupDialog(final java.util.Collection<BTab> targets) {
+        final List<String> names = new ArrayList<>();
+        for (BTab t : ops.tabs()) if (t.group != null && t.priv == showPrivate && !names.contains(t.group)) names.add(t.group);
+        final List<String> labels = new ArrayList<>();
+        labels.add("New group…");
+        labels.addAll(names);
+        labels.add("Remove from group");
+        new AlertDialog.Builder(host.act()).setTitle("Tab group").setItems(labels.toArray(new String[0]), (dd, which) -> {
+            if (which == 0) askGroupName(null, name -> { for (BTab t : targets) t.group = name; finishGrouping(); });
+            else if (which == labels.size() - 1) { for (BTab t : targets) t.group = null; finishGrouping(); }
+            else { for (BTab t : targets) t.group = names.get(which - 1); finishGrouping(); }
+        }).show();
+    }
+
+    private void finishGrouping() { selected.clear(); selecting = false; render(); }
 
     private void buildHeader() {
         header.removeAllViews();
@@ -218,6 +318,7 @@ final class TabsPage extends LinearLayout implements Page {
                 for (BTab t : selected) if (t.url.startsWith("http")) sb.append(t.title).append("\n").append(t.url).append("\n\n");
                 host.share(sb.toString().trim());
             }));
+            bottom.addView(action("Group", "grid", UI.TEXT, v -> groupDialog(new ArrayList<>(selected))));
             bottom.addView(action("Duplicate", "copy", UI.TEXT, v -> {
                 for (BTab t : new ArrayList<>(selected)) if (t.url.startsWith("http")) ops.newTab(t.url, t.priv);
                 selected.clear(); selecting = false; render();
@@ -269,6 +370,11 @@ final class TabsPage extends LinearLayout implements Page {
         col.addView(top, new LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, UI.dp(c, 36)));
         col.addView(thumbView(t), new LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
         card.addView(col, UI.match());
+        if (t.group != null) {
+            View bar = new View(c);
+            bar.setBackgroundColor(groupColor(t.group));
+            card.addView(bar, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, UI.dp(c, 4), Gravity.TOP));
+        }
         if (t.pinned) {
             ImageView pin = new ImageView(c);
             pin.setImageDrawable(Ico.of("pin", Color.WHITE));
@@ -322,6 +428,13 @@ final class TabsPage extends LinearLayout implements Page {
         boolean sel = selected.contains(t);
         r.setBackground(UI.box(c, sel ? UI.ACCENT_BG : UI.BG, 12, t == ops.current() ? (t.priv ? UI.PRIVATE : UI.ACCENT) : UI.BORDER));
         r.setPadding(UI.dp(c, 10), UI.dp(c, 8), UI.dp(c, 4), UI.dp(c, 8));
+        if (t.group != null) {
+            View bar = new View(c);
+            bar.setBackground(UI.box(c, groupColor(t.group), 3, 0));
+            LayoutParams bp = new LayoutParams(UI.dp(c, 5), UI.dp(c, 46));
+            bp.rightMargin = UI.dp(c, 8);
+            r.addView(bar, bp);
+        }
         FrameLayout th = new FrameLayout(c);
         th.setBackground(UI.box(c, UI.SURFACE, 8, 0));
         th.setClipToOutline(true);
@@ -382,6 +495,7 @@ final class TabsPage extends LinearLayout implements Page {
         final Dialog[] d = new Dialog[1];
         addSheetRow(box, d, t.pinned ? "Unpin tab" : "Pin tab", "pin", () -> { t.pinned = !t.pinned; render(); });
         addSheetRow(box, d, "Duplicate", "copy", () -> { if (t.url.startsWith("http")) { ops.newTab(t.url, t.priv); render(); } });
+        addSheetRow(box, d, t.group == null ? "Add to group…" : "Change group…", "grid", () -> groupDialog(java.util.Collections.singletonList(t)));
         addSheetRow(box, d, "Copy link", "copy", () -> host.copySecret(t.url));
         addSheetRow(box, d, "Close other tabs", "close", () -> { for (BTab o : new ArrayList<>(ops.tabs())) if (o != t && !o.pinned) ops.close(o); render(); });
         d[0] = UI.sheet(host.act(), box);

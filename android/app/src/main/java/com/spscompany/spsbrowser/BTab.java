@@ -9,6 +9,7 @@ final class BTab {
     boolean priv;
     boolean desktop;
     boolean pinned;
+    String group;                // tab group name (null = not in a group)
     boolean loading;
     String title = "New tab";
     String url = "";

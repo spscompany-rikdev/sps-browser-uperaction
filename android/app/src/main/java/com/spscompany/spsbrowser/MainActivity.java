@@ -104,6 +104,7 @@ public class MainActivity extends Activity implements Host {
 
     private SharedPreferences prefs;
     private boolean adBlock = true;
+    private boolean dataSaver = false;               // no pictures: pages load faster and use less data
     private boolean hideBanners = true;              // hides cookie / consent pop-ups of the common consent tools
     private boolean ytShield = true;                  // YouTube: remove the ads from the player data (like Brave), no lag
     private String ytJs;
@@ -130,6 +131,9 @@ public class MainActivity extends Activity implements Host {
     private LinearLayout bottomBar, pill, bannerSlot;
     private TextView tabsCountText, profileAvatar;
     private ImageView lockIcon, starIcon, reloadIcon, backIcon, fwdIcon;
+    private ImageView menuBtn, easyIcon;
+    private String easyJs;
+    private final android.os.Handler easyHandler = new android.os.Handler(android.os.Looper.getMainLooper());
     private boolean offerSave = true, offerFill = true, requireUnlock = true, switchingProfile;
     private long unlockedAt, lastSaveOffer;
     private Runnable pendingUnlock;
@@ -139,6 +143,7 @@ public class MainActivity extends Activity implements Host {
     private static final int REQ_APPLOCK = 4714;
     private static final int REQ_LENS = 4716, REQ_LENS_PERM = 4717;
     private Uri lensCamera;
+    private boolean qrMode;                           // the photo is read as a QR code instead of being sent to Lens
     private static final int REQ_CAMERA_PERM = 4715;
     private boolean stripLinks = true, appLock = false, askDownload = false, dailyQuote = true;
     private int quoteIndex;
@@ -176,6 +181,7 @@ public class MainActivity extends Activity implements Host {
         adBlock = prefs.getBoolean("adblock", true);
         ytShield = prefs.getBoolean("ytshield", true);
         hideBanners = prefs.getBoolean("hidebanners", true);
+        dataSaver = prefs.getBoolean("datasaver", false);
         darkMode = prefs.getBoolean("dark", false);
         thirdPartyCookies = prefs.getBoolean("thirdcookies", false);
         jsEnabled = prefs.getBoolean("js", true);
@@ -207,6 +213,7 @@ public class MainActivity extends Activity implements Host {
         engine = Math.max(0, Math.min(ENGINE_URLS.length - 1, prefs.getInt("engine", 0)));
         textSizeIndex = Math.max(0, Math.min(TEXT_SIZES.length - 1, prefs.getInt("textsize", 0)));
         loadBlocklist();
+        new Thread(() -> { try { injectYoutubeShield(null, null); } catch (Throwable ignored) { } }).start();   // read the script from assets off the UI thread
         buildUi();
         applySystemBars();
 
@@ -328,6 +335,8 @@ public class MainActivity extends Activity implements Host {
         fwdIcon = UI.icon(this, "forward", UI.TEXT, 48, 12);
         ImageView plus = UI.icon(this, "plus", UI.TEXT, 48, 12);
         ImageView menuIcon = UI.icon(this, "menu", UI.TEXT, 48, 12);
+        menuBtn = menuIcon;
+        easyIcon = UI.icon(this, "tune", UI.TEXT, 48, 12);
         FrameLayout tabsBtn = new FrameLayout(this);
         tabsBtn.setBackground(UI.ripple(this, Color.TRANSPARENT, 24, 0));
         tabsBtn.setClickable(true);
@@ -335,7 +344,7 @@ public class MainActivity extends Activity implements Host {
         tabsCountText.setGravity(Gravity.CENTER);
         tabsCountText.setBackground(UI.box(this, Color.TRANSPARENT, 6, UI.TEXT));
         tabsBtn.addView(tabsCountText, new FrameLayout.LayoutParams(dp(24), dp(24), Gravity.CENTER));
-        for (View v : new View[]{backIcon, fwdIcon, plus, tabsBtn, menuIcon}) {
+        for (View v : new View[]{backIcon, fwdIcon, plus, tabsBtn, easyIcon, menuIcon}) {
             bottomBar.addView(v, new LinearLayout.LayoutParams(0, dp(52), 1f));
         }
         backIcon.setOnClickListener(v -> { if (current != null && current.web.canGoBack()) current.web.goBack(); else if (current != null && tabs.size() > 1) closeTab(current); });
@@ -343,6 +352,8 @@ public class MainActivity extends Activity implements Host {
         plus.setOnClickListener(v -> newTab(null, current != null && current.priv, true));
         tabsBtn.setOnClickListener(v -> showTabs());
         menuIcon.setOnClickListener(v -> showMenu());
+        easyIcon.setOnClickListener(v -> showEasyAccess());
+        easyIcon.setContentDescription("Easy access");
 
         column.addView(bar, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         column.addView(progress, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(2)));
@@ -528,6 +539,7 @@ public class MainActivity extends Activity implements Host {
         final WebView web = tab.web;
         WebSettings s = web.getSettings();
         s.setJavaScriptEnabled(true);
+        s.setLoadsImagesAutomatically(!dataSaver);
         s.setDomStorageEnabled(true);
         s.setAllowFileAccess(false);
         s.setAllowContentAccess(true);          // needed so files and photos picked for upload can be read
@@ -590,7 +602,8 @@ public class MainActivity extends Activity implements Host {
                 String pageHost = UI.hostOf(tab.url);
                 if (adBlock && ytShield && !request.isForMainFrame() && isYoutubeAdRequest(request.getUrl()) && !shieldOff.contains(pageHost)) {
                     blockedCount.incrementAndGet();
-                    return new WebResourceResponse("text/plain", "utf-8", new ByteArrayInputStream(new byte[0]));
+                    // 204 = "done, nothing to send": the player does not wait or retry (an error would make the video start slower)
+                    return new WebResourceResponse("text/plain", "utf-8", 204, "No Content", new java.util.HashMap<String, String>(), new ByteArrayInputStream(new byte[0]));
                 }
                 if (adBlock && !request.isForMainFrame() && !shieldOff.contains(pageHost) && isBlockedHost(reqHost)
                         && Shield.isThirdParty(pageHost, reqHost)) {
@@ -1364,9 +1377,18 @@ public class MainActivity extends Activity implements Host {
 
     private void injectYoutubeShield(WebView view, String url) {
         try {
-            if (hideBanners && url != null && url.startsWith("http") && !UI.hostOf(url).isEmpty() && !shieldOff.contains(UI.hostOf(url)))
+            if (hideBanners && url != null && url.startsWith("http") && !UI.hostOf(url).isEmpty() && !shieldOff.contains(UI.hostOf(url))
+                    && !isYoutubeHost(UI.hostOf(url)))
                 view.evaluateJavascript(BANNER_JS, null);
-            if (!adBlock || !ytShield || url == null) return;
+            if (ytJs == null && getAssets() != null) {
+                try (java.io.InputStream in = getAssets().open("yt_shield.js")) {
+                    java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+                    byte[] buf = new byte[4096]; int n;
+                    while ((n = in.read(buf)) > 0) bo.write(buf, 0, n);
+                    ytJs = bo.toString("UTF-8");
+                } catch (Throwable ignored) { }
+            }
+            if (view == null || !adBlock || !ytShield || url == null) return;
             String host = UI.hostOf(url);
             if (!isYoutubeHost(host) || shieldOff.contains(host)) return;
             if (ytJs == null) {
@@ -1377,7 +1399,10 @@ public class MainActivity extends Activity implements Host {
                     ytJs = bo.toString("UTF-8");
                 }
             }
-            view.evaluateJavascript(ytJs, null);
+            final String js = ytJs;
+            view.evaluateJavascript("window.__spsYtShield===true", v -> {      // already running on this page? then do nothing
+                if (!"true".equals(v)) view.evaluateJavascript(js, null);
+            });
         } catch (Throwable ignored) { }
     }
 
@@ -1692,6 +1717,9 @@ public class MainActivity extends Activity implements Host {
         menuRow(box, d, "magic", "Extension store", extOn.size() + " added", this::showExtensions);
         menuRow(box, d, "mic", "Voice search", null, this::voiceSearch);
         menuRow(box, d, "image", "Search with Lens", "Camera or a photo", this::startLens);
+        menuRow(box, d, "shield", "Safety Check", "Leaked passwords, scripts, version", this::showSafetyCheck);
+        menuRow(box, d, "qr", "Send tab (QR code)", "Show this page as a QR code", this::sendCurrentTabQr);
+        menuRow(box, d, "qr", "Scan a QR code", "Camera or a picture", this::startQrScan);
         menuRow(box, d, "sliders", "Page tools", "Screenshot, source, page info ...", this::showTools);
         menuRow(box, d, "bookmark", "Thought of the day", "Words from great people", () -> showQuote(false));
         box.addView(UI.divider(this));
@@ -1700,7 +1728,224 @@ public class MainActivity extends Activity implements Host {
         menuRow(box, d, "refresh", "Check for updates", "Version " + myVersion(), () -> checkForUpdate(true));
         menuRow(box, d, "info", "About SPS Browser", null, this::showAbout);
         d[0] = UI.sheet(this, box);
+        spinMenuButton(true);
+        d[0].setOnDismissListener(x -> spinMenuButton(false));
         d[0].show();
+    }
+
+    /** The menu button spins half a turn and turns into the SPS Browser logo while the menu is open (and back when it closes). */
+    private void spinMenuButton(boolean open) {
+        if (menuBtn == null) return;
+        try {
+            menuBtn.animate().cancel();
+            menuBtn.animate().rotationBy(180f).scaleX(0.7f).scaleY(0.7f).alpha(0f).setDuration(140).withEndAction(() -> {
+                try {
+                    if (open) {
+                        menuBtn.setImageDrawable(getResources().getDrawable(getApplicationInfo().icon));
+                        menuBtn.setPadding(dp(11), dp(11), dp(11), dp(11));
+                    } else {
+                        menuBtn.setImageDrawable(Ico.of("menu", UI.TEXT));
+                        menuBtn.setPadding(dp(12), dp(12), dp(12), dp(12));
+                    }
+                } catch (Throwable ignored) { }
+                menuBtn.animate().rotationBy(180f).scaleX(1f).scaleY(1f).alpha(1f).setDuration(200).withEndAction(() -> menuBtn.setRotation(0f)).start();
+            }).start();
+        } catch (Throwable ignored) { }
+    }
+
+    // ───────────────────────────── easy access ─────────────────────────────
+    private void easyEval(WebView w, String call, android.webkit.ValueCallback<String> cb) {
+        if (w == null) return;
+        try {
+            if (easyJs == null) {
+                try (java.io.InputStream in = getAssets().open("easy.js")) {
+                    java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+                    byte[] buf = new byte[4096]; int n;
+                    while ((n = in.read(buf)) > 0) bo.write(buf, 0, n);
+                    easyJs = bo.toString("UTF-8");
+                }
+            }
+            w.evaluateJavascript("(function(){if(!window.__spsEasy){" + easyJs + "}return " + call + ";})()", cb);
+        } catch (Throwable ignored) { }
+    }
+
+    private static String easyUnquote(String r) {
+        if (r == null || r.equals("null")) return "{}";
+        try { Object o = new org.json.JSONTokener(r).nextValue(); return o instanceof String ? (String) o : r; } catch (Exception e) { return "{}"; }
+    }
+
+    /** Current tab first, then the other tabs: the first one that is playing wins, otherwise the current tab. */
+    private void easyFind(final java.util.List<BTab> order, final int idx, final JSONObject curInfo, final java.util.function.BiConsumer<BTab, JSONObject> done) {
+        if (idx >= order.size()) { done.accept(order.get(0), curInfo == null ? new JSONObject() : curInfo); return; }
+        final BTab t = order.get(idx);
+        easyEval(t.web, "__spsEasy.probe()", r -> {
+            JSONObject o;
+            try { o = new JSONObject(easyUnquote(r)); } catch (Exception e) { o = new JSONObject(); }
+            JSONObject m = o.optJSONObject("media");
+            if (m != null && !m.optBoolean("paused", true)) { done.accept(t, o); return; }
+            easyFind(order, idx + 1, idx == 0 ? o : curInfo, done);
+        });
+    }
+
+    private void showEasyAccess() {
+        if (current == null) return;
+        java.util.List<BTab> order = new ArrayList<>();
+        order.add(current);
+        for (BTab t : tabs) if (t != current && order.size() < 6) order.add(t);
+        easyFind(order, 0, null, this::buildEasySheet);
+    }
+
+    private void easyBtnIcons(LinearLayout row, Object[][] items, final Dialog[] d, final boolean closeAfter) {
+        for (final Object[] it : items) {
+            ImageView iv = UI.icon(this, (String) it[0], UI.TEXT, 48, 12);
+            iv.setContentDescription((String) it[1]);
+            iv.setOnClickListener(v -> { ((Runnable) it[2]).run(); if (closeAfter && d[0] != null) d[0].dismiss(); });
+            row.addView(iv, new LinearLayout.LayoutParams(0, dp(48), 1f));
+        }
+    }
+
+    private void buildEasySheet(final BTab tab, JSONObject info) {
+        final Dialog[] d = new Dialog[1];
+        final LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(14), dp(4), dp(14), dp(16));
+        final JSONObject media = info.optJSONObject("media");
+        final boolean isImg = info.optBoolean("isImg", false);
+        String title = info.optString("title", "");
+        if (media != null && !media.optString("title").isEmpty()) title = media.optString("title");
+        if (title.isEmpty()) title = UI.hostOf(info.optString("url", ""));
+        box.addView(UI.text(this, media != null ? "Now playing" : isImg ? "Photo tools" : "Page tools", 12, UI.TEXT3, true));
+        TextView tv = UI.text(this, title.isEmpty() ? "SPS Browser" : title, 17, UI.TEXT, true);
+        tv.setSingleLine(true); tv.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        box.addView(tv);
+        final WebView w = tab.web;
+        if (media != null) {
+            if (!media.optString("artist").isEmpty()) box.addView(UI.text(this, media.optString("artist"), 13, UI.TEXT2, false));
+            final android.widget.SeekBar seek = new android.widget.SeekBar(this);
+            seek.setMax(1000);
+            seek.getProgressDrawable().setTint(UI.ACCENT); seek.getThumb().setTint(UI.ACCENT);
+            final TextView time = UI.text(this, "0:00 / 0:00", 12, UI.TEXT3, false);
+            double dur = media.optDouble("d", 0), cur = media.optDouble("t", 0);
+            seek.setProgress(dur > 0 ? (int) (1000 * cur / dur) : 0);
+            time.setText(fmtTime(cur) + " / " + fmtTime(dur));
+            final boolean[] drag = {false};
+            seek.setOnSeekBarChangeListener(new android.widget.SeekBar.OnSeekBarChangeListener() {
+                @Override public void onProgressChanged(android.widget.SeekBar s2, int p, boolean fromUser) { }
+                @Override public void onStartTrackingTouch(android.widget.SeekBar s2) { drag[0] = true; }
+                @Override public void onStopTrackingTouch(android.widget.SeekBar s2) { drag[0] = false; easyEval(w, "__spsEasy.ctl('seekfrac'," + (s2.getProgress() / 1000.0) + ")", null); }
+            });
+            LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            sp.topMargin = dp(10);
+            box.addView(seek, sp);
+            box.addView(time);
+            LinearLayout r1 = new LinearLayout(this); r1.setGravity(Gravity.CENTER);
+            final ImageView play = UI.icon(this, media.optBoolean("paused") ? "play" : "pause", Color.WHITE, 56, 14);
+            play.setBackground(UI.box(this, UI.ACCENT, 28, 0));
+            play.setOnClickListener(v -> easyEval(w, "__spsEasy.ctl('toggle')", null));
+            easyBtnIcons(r1, new Object[][]{
+                {"prev", "Previous", (Runnable) () -> easyEval(w, "__spsEasy.ctl('prev')", null)},
+                {"back10", "Back 10 seconds", (Runnable) () -> easyEval(w, "__spsEasy.ctl('seekrel',-10)", null)}}, d, false);
+            r1.addView(play, new LinearLayout.LayoutParams(dp(56), dp(56)));
+            easyBtnIcons(r1, new Object[][]{
+                {"fwd10", "Forward 10 seconds", (Runnable) () -> easyEval(w, "__spsEasy.ctl('seekrel',10)", null)},
+                {"next", "Next", (Runnable) () -> easyEval(w, "__spsEasy.ctl('next')", null)}}, d, false);
+            box.addView(r1);
+            LinearLayout r2 = new LinearLayout(this); r2.setGravity(Gravity.CENTER);
+            easyBtnIcons(r2, new Object[][]{
+                {media.optBoolean("muted") ? "mute" : "volume", "Mute", (Runnable) () -> easyEval(w, "__spsEasy.ctl('mute')", null)},
+                {"repeat", "Loop", (Runnable) () -> easyEval(w, "__spsEasy.ctl('loop')", null)},
+                {"pip", "Picture in picture", (Runnable) () -> easyEval(w, "__spsEasy.ctl('pip')", null)},
+                {"fullscreen", "Fullscreen", (Runnable) () -> { if (d[0] != null) d[0].dismiss(); easyEval(w, "__spsEasy.ctl('fs')", null); }}}, d, false);
+            box.addView(r2);
+            LinearLayout r3 = new LinearLayout(this); r3.setGravity(Gravity.CENTER);
+            double rate = media.optDouble("rate", 1);
+            for (final double rt : new double[]{0.5, 0.75, 1, 1.25, 1.5, 2}) {
+                boolean on = Math.abs(rate - rt) < 0.01;
+                TextView b = UI.text(this, (rt == (int) rt ? String.valueOf((int) rt) : String.valueOf(rt)) + "×", 13, on ? Color.WHITE : UI.TEXT, true);
+                b.setGravity(Gravity.CENTER);
+                b.setBackground(UI.box(this, on ? UI.ACCENT : UI.SURFACE, 16, 0));
+                b.setOnClickListener(v -> { easyEval(w, "__spsEasy.ctl('rate'," + rt + ")", null); if (d[0] != null) d[0].dismiss(); });
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(34), 1f); lp.setMargins(dp(3), dp(6), dp(3), 0);
+                r3.addView(b, lp);
+            }
+            box.addView(r3);
+            if (tab != current) {
+                LinearLayout go = UI.row(this, "open", "Go to this tab", null, UI.TEXT2);
+                go.setOnClickListener(v -> { d[0].dismiss(); switchTo(tab); });
+                box.addView(go);
+            }
+            final Runnable[] tick = new Runnable[1];            // live update of the seek bar while the sheet is open
+            tick[0] = () -> {
+                if (d[0] == null || !d[0].isShowing()) return;
+                easyEval(w, "__spsEasy.probe()", r -> {
+                    try {
+                        JSONObject m = new JSONObject(easyUnquote(r)).optJSONObject("media");
+                        if (m != null && !drag[0]) {
+                            double dd = m.optDouble("d", 0), cc = m.optDouble("t", 0);
+                            seek.setProgress(dd > 0 ? (int) (1000 * cc / dd) : 0);
+                            time.setText(fmtTime(cc) + " / " + fmtTime(dd));
+                            play.setImageDrawable(Ico.of(m.optBoolean("paused") ? "play" : "pause", Color.WHITE));
+                        }
+                    } catch (Exception ignored) { }
+                });
+                easyHandler.postDelayed(tick[0], 1000);
+            };
+            easyHandler.postDelayed(tick[0], 1000);
+        } else if (isImg) {
+            LinearLayout r1 = new LinearLayout(this); r1.setGravity(Gravity.CENTER);
+            easyBtnIcons(r1, new Object[][]{
+                {"rotate", "Rotate", (Runnable) () -> easyEval(w, "__spsEasy.img('rot')", null)},
+                {"flip", "Flip", (Runnable) () -> easyEval(w, "__spsEasy.img('flip')", null)},
+                {"dark", "Black and white", (Runnable) () -> easyEval(w, "__spsEasy.img('gray')", null)},
+                {"refresh", "Reset", (Runnable) () -> easyEval(w, "__spsEasy.img('reset')", null)}}, d, false);
+            box.addView(r1);
+            for (final String[] sl : new String[][]{{"Brightness", "b"}, {"Contrast", "c"}, {"Colour", "s"}}) {
+                box.addView(UI.text(this, sl[0], 12, UI.TEXT3, true));
+                android.widget.SeekBar sb = new android.widget.SeekBar(this);
+                sb.setMax(180); sb.setProgress(80);
+                sb.getProgressDrawable().setTint(UI.ACCENT); sb.getThumb().setTint(UI.ACCENT);
+                sb.setOnSeekBarChangeListener(new android.widget.SeekBar.OnSeekBarChangeListener() {
+                    @Override public void onProgressChanged(android.widget.SeekBar s2, int p, boolean u) { if (u) easyEval(w, "__spsEasy.img('" + sl[1] + "'," + (p + 20) + ")", null); }
+                    @Override public void onStartTrackingTouch(android.widget.SeekBar s2) { }
+                    @Override public void onStopTrackingTouch(android.widget.SeekBar s2) { }
+                });
+                box.addView(sb);
+            }
+            final String url = info.optString("url", "");
+            menuRow(box, d, "download", "Save photo", null, () -> w.evaluateJavascript("(function(){var a=document.createElement('a');a.href=location.href;a.download='';document.body.appendChild(a);a.click();a.remove()})()", null));
+            menuRow(box, d, "copy", "Copy photo link", null, () -> { ((android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(android.content.ClipData.newPlainText("url", url)); toast("Link copied"); });
+            menuRow(box, d, "image", "Search with Lens", "Find where this photo is from", this::startLens);
+            menuRow(box, d, "share", "Share", null, this::sharePage);
+            menuRow(box, d, "print", "Print", null, this::printPage);
+        } else {
+            final boolean page = !isNewTab(tab.url);
+            LinearLayout q = new LinearLayout(this);
+            boolean bm = page && store.isBookmarked(tab.url);
+            q.addView(quickAction(d, bm ? "starfill" : "star", bm ? "Bookmarked" : "Bookmark", page, this::toggleBookmark));
+            q.addView(quickAction(d, "share", "Share", page, this::sharePage));
+            q.addView(quickAction(d, "print", "Print", page, this::printPage));
+            q.addView(quickAction(d, "reload", "Reload", true, () -> tab.web.reload()));
+            box.addView(q);
+            menuRow(box, d, "find", "Find in page", null, this::openFindBar);
+            if (page) {
+                menuRow(box, d, "reader", "Reader mode", null, this::readerMode);
+                menuRow(box, d, "translate", "Translate page", null, this::translatePage);
+                menuRow(box, d, "qr", "Send tab (QR code)", null, this::sendCurrentTabQr);
+                menuRow(box, d, "copy", "Copy link", null, this::copyLink);
+                menuRow(box, d, "mic", "Read aloud", null, this::readAloud);
+                if (info.optInt("imgs", 0) > 0)
+                    menuRow(box, d, "grid", "View all " + info.optInt("imgs") + " images", "Gallery of this page's pictures", () -> easyEval(w, "__spsEasy.gallery()", null));
+            }
+            menuRow(box, d, "sliders", "More page tools", "Screenshot, source, page info ...", this::showTools);
+        }
+        d[0] = UI.sheet(this, box);
+        d[0].setOnDismissListener(x -> easyHandler.removeCallbacksAndMessages(null));
+        d[0].show();
+    }
+
+    private static String fmtTime(double sec) {
+        int s = (int) Math.max(0, sec), h = s / 3600, m = (s % 3600) / 60, x = s % 60;
+        return h > 0 ? String.format(java.util.Locale.US, "%d:%02d:%02d", h, m, x) : String.format(java.util.Locale.US, "%d:%02d", m, x);
     }
 
     // ───────────────────────────── bookmarks ─────────────────────────────
@@ -2005,6 +2250,10 @@ public class MainActivity extends Activity implements Host {
         settingHeader(list, "Privacy & security");
         settingSwitch(list, "Block ads & trackers", "Hides known ad and tracking servers", adBlock, v -> { adBlock = v; putBool("adblock", v); });
         settingSwitch(list, "Smart YouTube ad blocking", "Removes the ad schedule from the video data, hides ad boxes. Light on battery, no lag", ytShield, v -> { ytShield = v; putBool("ytshield", v); });
+        settingSwitch(list, "Data saver (no pictures)", "Pages load faster and use less mobile data. Turn off to see pictures again", dataSaver, v -> {
+            dataSaver = v; putBool("datasaver", v);
+            for (BTab t : tabs) { try { t.web.getSettings().setLoadsImagesAutomatically(!v); if (!v) t.web.reload(); } catch (Throwable ignored) { } }
+        });
         settingSwitch(list, "Hide cookie pop-ups", "Hides the consent banners of the common cookie tools (nothing is accepted for you)", hideBanners, v -> { hideBanners = v; putBool("hidebanners", v); });
         settingSwitch(list, "Remove tracking from links", "Cleans utm_*, fbclid, gclid ... from addresses", stripLinks, v -> { stripLinks = v; putBool("striplinks", v); });
         settingSwitch(list, "Allow third-party cookies", "Off is more private; some logins need it", thirdPartyCookies, v -> { thirdPartyCookies = v; putBool("thirdcookies", v); applyAllTabs(); });
@@ -2828,10 +3077,11 @@ public class MainActivity extends Activity implements Host {
         lensCamera = null;
         final Uri src = resultCode == RESULT_OK ? (data != null && data.getData() != null ? data.getData() : cam) : null;
         if (src == null) {
+            qrMode = false;
             if (cam != null) { try { getContentResolver().delete(cam, null, null); } catch (Exception ignored) { } }
             return;
         }
-        toast("Preparing the photo...");
+        toast(qrMode ? "Reading the QR code..." : "Preparing the photo...");
         new Thread(() -> {
             String b64 = null;
             try {
@@ -2861,12 +3111,200 @@ public class MainActivity extends Activity implements Host {
             } catch (Exception ignored) { }
             if (cam != null) { try { getContentResolver().delete(cam, null, null); } catch (Exception ignored) { } }   // do not leave the photo in the gallery
             final String data64 = b64;
+            final boolean asQr = qrMode;
+            qrMode = false;
             runOnUiThread(() -> {
                 if (data64 == null) { toast("That photo could not be read"); return; }
+                if (asQr) { decodeQr(data64); return; }
                 BTab t = newTab(null, false, true);
                 t.web.loadDataWithBaseURL("https://lens.google.com/", Lens.uploadPage(Lens.UPLOAD, Lens.FIELD, data64), "text/html", "utf-8", null);
             });
         }, "sps-lens").start();
+    }
+
+    // ───────────────────────────── QR codes, send tab, Safety Check ─────────────────────────────
+    private void showQrDialog(String title, final String url) {
+        if (url == null || !url.startsWith("http")) { toast("Open a web page first"); return; }
+        if (url.getBytes().length > Qr.MAX_BYTES) { toast("This address is too long for a QR code. Use Share instead."); return; }
+        try {
+            LinearLayout box = new LinearLayout(this);
+            box.setOrientation(LinearLayout.VERTICAL);
+            box.setGravity(Gravity.CENTER_HORIZONTAL);
+            box.setPadding(UI.dp(this, 20), UI.dp(this, 16), UI.dp(this, 20), UI.dp(this, 8));
+            ImageView iv = new ImageView(this);
+            iv.setImageBitmap(Qr.bitmap(url, 720));
+            iv.setBackgroundColor(Color.WHITE);
+            box.addView(iv, new LinearLayout.LayoutParams(UI.dp(this, 260), UI.dp(this, 260)));
+            TextView t = new TextView(this);
+            t.setText("Scan this with another phone's camera (or any QR app) to open the page there.\n\n" + (title == null ? "" : title));
+            t.setGravity(Gravity.CENTER);
+            t.setPadding(0, UI.dp(this, 12), 0, 0);
+            box.addView(t);
+            new AlertDialog.Builder(this).setTitle("Send this tab").setView(box)
+                    .setPositiveButton("Share link", (d, w) -> startActivity(Intent.createChooser(new Intent(Intent.ACTION_SEND).setType("text/plain")
+                            .putExtra(Intent.EXTRA_TEXT, url).putExtra(Intent.EXTRA_SUBJECT, title), "Send tab")))
+                    .setNeutralButton("Copy", (d, w) -> {
+                        ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                        if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("link", url));
+                        toast("Link copied");
+                    })
+                    .setNegativeButton("Close", null).show();
+        } catch (Throwable e) { toast("The QR code could not be drawn"); }
+    }
+
+    private void sendCurrentTabQr() { if (current != null) showQrDialog(current.title, current.url); else toast("Open a page first"); }
+
+    private void shareAllTabs() {
+        StringBuilder sb = new StringBuilder();
+        for (BTab t : tabs) if (!t.priv && t.url != null && t.url.startsWith("http")) sb.append(t.url).append('\n');
+        if (sb.length() == 0) { toast("No web tabs to send"); return; }
+        startActivity(Intent.createChooser(new Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, sb.toString().trim()), "Send all tabs"));
+    }
+
+    /** Opens every web link found in the clipboard (a list of tabs sent from another device). */
+    private void openLinksFromClipboard() {
+        ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        CharSequence t = null;
+        if (cm != null && cm.hasPrimaryClip() && cm.getPrimaryClip().getItemCount() > 0) t = cm.getPrimaryClip().getItemAt(0).getText();
+        int n = 0;
+        if (t != null) for (String line : t.toString().split("[\\r\\n,]+")) if (Qr.isWebLink(line.trim()) && n < 20) { newTab(line.trim(), false, true); n++; }
+        toast(n == 0 ? "No web links in the clipboard" : n + " tab(s) opened");
+    }
+
+    private void startQrScan() {
+        new AlertDialog.Builder(this).setTitle("Scan a QR code")
+                .setItems(new String[]{"Take a photo of the QR code", "Choose a picture with a QR code"}, (d, which) -> {
+                    qrMode = true;
+                    if (which == 0) {
+                        if (checkSelfPermission(android.Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED)
+                            requestPermissions(new String[]{android.Manifest.permission.CAMERA}, REQ_LENS_PERM);
+                        else lensCapture();
+                    } else {
+                        lensCamera = null;
+                        Intent pick = new Intent(Intent.ACTION_GET_CONTENT);
+                        pick.addCategory(Intent.CATEGORY_OPENABLE);
+                        pick.setType("image/*");
+                        try { startActivityForResult(pick, REQ_LENS); } catch (Exception e) { qrMode = false; toast("No gallery app found"); }
+                    }
+                }).setNegativeButton("Cancel", null).show();
+    }
+
+    private String qrJs;
+
+    private void decodeQr(final String jpegB64) {
+        try {
+            if (qrJs == null) {
+                try (java.io.InputStream in = getAssets().open("jsQR.js")) {
+                    java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+                    byte[] buf = new byte[8192]; int n;
+                    while ((n = in.read(buf)) > 0) bo.write(buf, 0, n);
+                    qrJs = bo.toString("UTF-8");
+                }
+            }
+            final WebView w = new WebView(this);                       // never shown; only used to run the decoder
+            w.getSettings().setJavaScriptEnabled(true);
+            w.getSettings().setAllowFileAccess(false);
+            final boolean[] done = {false};
+            w.addJavascriptInterface(new Object() {
+                @JavascriptInterface public void result(final String text) {
+                    runOnUiThread(() -> { if (done[0]) return; done[0] = true; try { w.destroy(); } catch (Throwable ignored) { } onQrText(text); });
+                }
+            }, "SPSQR");
+            w.loadDataWithBaseURL("https://sps.invalid/", Qr.decodePage(qrJs, jpegB64), "text/html", "utf-8", null);
+            new Handler(Looper.getMainLooper()).postDelayed(() -> { if (!done[0]) { done[0] = true; try { w.destroy(); } catch (Throwable ignored) { } onQrText(""); } }, 15000);
+        } catch (Throwable e) { toast("The QR code could not be read"); }
+    }
+
+    private void onQrText(final String text) {
+        if (text == null || text.isEmpty()) { toast("No QR code found. Try again, closer and in better light."); return; }
+        if (Qr.isWebLink(text)) {
+            new AlertDialog.Builder(this).setTitle("QR code found").setMessage("Open this link?\n\n" + text)
+                    .setPositiveButton("Open", (d, w) -> newTab(text.trim(), false, true))
+                    .setNegativeButton("Cancel", null).show();
+        } else {
+            new AlertDialog.Builder(this).setTitle("QR code found").setMessage(text)
+                    .setPositiveButton("Search", (d, w) -> go(text))
+                    .setNeutralButton("Copy", (d, w) -> {
+                        ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                        if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("qr", text));
+                    })
+                    .setNegativeButton("Close", null).show();     // never opened automatically: it is not a web link
+        }
+    }
+
+    private void showSafetyCheck() {
+        final LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(UI.dp(this, 16), UI.dp(this, 12), UI.dp(this, 16), UI.dp(this, 8));
+        final TextView head = new TextView(this);
+        head.setText("Checking passwords, scripts, version and protection...\nOnly a 5-character fingerprint of a password ever leaves the phone.");
+        head.setTextSize(15);
+        box.addView(head);
+        final ProgressBar bar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        bar.setIndeterminate(true);
+        box.addView(bar);
+        final LinearLayout rows = new LinearLayout(this);
+        rows.setOrientation(LinearLayout.VERTICAL);
+        ScrollView sv = new ScrollView(this);
+        sv.addView(rows);
+        box.addView(sv, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, UI.dp(this, 360)));
+        final AlertDialog dlg = new AlertDialog.Builder(this).setTitle("Safety Check").setView(box)
+                .setPositiveButton("Close", null).setNeutralButton("Open passwords", (d, w) -> Vault.openList(this)).show();
+        final List<JSONObject> logins = new ArrayList<>(store.vault());
+        final JSONArray scripts = userScripts;
+        final String ver = myVersion(), repo = updateRepo();
+        new Thread(() -> {
+            final List<Safety.Result> out = new ArrayList<>();
+            out.add(Safety.setting(adBlock, "Tracker & ad blocking", "Turn on 'Block ads & trackers' in Settings."));
+            out.add(Safety.setting(noPopups, "Pop-up blocker", "Turn on the pop-up blocker in Settings."));
+            out.add(Safety.setting(stripLinks, "Remove tracking from links", "Turn on link cleaning in Settings."));
+            out.add(Safety.setting(appLock || requireUnlock, "Screen lock for passwords/app", "Turn on 'Ask for screen lock first' so nobody else can open your passwords."));
+            String latest = null;
+            if (repo.matches("[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")) {
+                try { Updater.Info i = Updater.fromRelease(fetchText("https://api.github.com/repos/" + repo + "/releases/latest")); if (i != null) latest = i.version; } catch (Exception ignored) { }
+            }
+            out.add(Safety.checkVersion(ver, latest));
+            int risky = 0;
+            for (int i = 0; i < scripts.length(); i++) {
+                JSONObject o = scripts.optJSONObject(i);
+                if (o == null || !o.optBoolean("on", true)) continue;
+                Safety.Result r = Safety.analyzeScript(o.optString("name", "?"), o.optString("m", "*"), o.optString("js", ""));
+                if (r != null) { out.add(r); risky++; }
+            }
+            if (risky == 0) out.add(new Safety.Result(Safety.OK, "Extensions", scripts.length() + " user script(s): nothing suspicious found (a quick code check, not a virus scan)."));
+            out.addAll(Safety.checkPasswords(logins, url -> {
+                java.net.HttpURLConnection c = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
+                c.setConnectTimeout(10000); c.setReadTimeout(15000);
+                c.setRequestProperty("Add-Padding", "true");
+                c.setRequestProperty("User-Agent", "SPS-Browser-SafetyCheck");
+                try (java.io.InputStream in = c.getInputStream()) {
+                    java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+                    byte[] buf = new byte[4096]; int n;
+                    while ((n = in.read(buf)) > 0) bo.write(buf, 0, n);
+                    return bo.toString("UTF-8");
+                }
+            }));
+            runOnUiThread(() -> {
+                if (isFinishing()) return;
+                bar.setVisibility(View.GONE);
+                int bad = 0, warn = 0;
+                for (Safety.Result r : out) { if (r.level.equals(Safety.BAD)) bad++; else if (r.level.equals(Safety.WARN)) warn++; }
+                head.setText(bad > 0 ? "⛔ " + bad + " serious problem(s), " + warn + " warning(s)" : warn > 0 ? "⚠️ " + warn + " warning(s)" : "✅ Everything looks fine");
+                String[] order = {Safety.BAD, Safety.WARN, Safety.INFO, Safety.OK};
+                for (String lv : order) for (Safety.Result r : out) {
+                    if (!r.level.equals(lv)) continue;
+                    TextView tv = new TextView(this);
+                    String icon = lv.equals(Safety.BAD) ? "⛔" : lv.equals(Safety.WARN) ? "⚠️" : lv.equals(Safety.OK) ? "✅" : "ℹ️";
+                    tv.setText(icon + "  " + r.title + "\n" + r.detail);
+                    tv.setTextSize(14);
+                    tv.setPadding(UI.dp(this, 12), UI.dp(this, 10), UI.dp(this, 12), UI.dp(this, 10));
+                    tv.setBackground(UI.box(this, 0x14000000, 12, 0));
+                    LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                    lp.topMargin = UI.dp(this, 6);
+                    rows.addView(tv, lp);
+                }
+            });
+        }, "sps-safety").start();
     }
 
     // ───────────────────────────── page tools ─────────────────────────────
@@ -2881,13 +3319,21 @@ public class MainActivity extends Activity implements Host {
             labels.add("Copy all page text"); acts.add(this::copyPageText);
             labels.add("Print / Save page as PDF"); acts.add(this::printPage);
             labels.add("Print selected area"); acts.add(this::printSelectedArea);
+            labels.add("Send this tab (QR code)"); acts.add(this::sendCurrentTabQr);
             labels.add("Share this page"); acts.add(() -> startActivity(Intent.createChooser(new Intent(Intent.ACTION_SEND).setType("text/plain")
                     .putExtra(Intent.EXTRA_TEXT, current.url).putExtra(Intent.EXTRA_SUBJECT, current.title), "Share page")));
             labels.add("Scroll to top"); acts.add(() -> current.web.scrollTo(0, 0));
             labels.add("Scroll to bottom"); acts.add(() -> current.web.evaluateJavascript("window.scrollTo(0,document.body.scrollHeight)", null));
         }
         labels.add("Open link from clipboard"); acts.add(this::pasteAndGo);
+        labels.add("Add search widget to home screen"); acts.add(() -> {
+            if (!SearchWidget.requestPin(this)) Toast.makeText(this, "Your launcher cannot add it from here. Long-press the home screen > Widgets > SPS Browser.", Toast.LENGTH_LONG).show();
+        });
         labels.add("Search with Lens"); acts.add(this::startLens);
+        labels.add("Safety Check"); acts.add(this::showSafetyCheck);
+        labels.add("Scan a QR code"); acts.add(this::startQrScan);
+        labels.add("Send all tabs (share list)"); acts.add(this::shareAllTabs);
+        labels.add("Open links from clipboard"); acts.add(this::openLinksFromClipboard);
         labels.add("Voice search"); acts.add(this::voiceSearch);
         new AlertDialog.Builder(this).setTitle("Page tools")
                 .setItems(labels.toArray(new String[0]), (d, which) -> acts.get(which).run()).show();
