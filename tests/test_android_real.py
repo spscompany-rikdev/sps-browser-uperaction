@@ -152,7 +152,7 @@ class WidgetAndResourceTests(unittest.TestCase):
         for view in re.findall(r'bind\(ctx, rv, "(\w+)"', w):
             self.assertIn("@+id/" + view, layout)
         for d in re.findall(r"@drawable/(\w+)", layout):
-            self.assertTrue(os.path.isfile(os.path.join(RES, "drawable", d + ".xml")), d)
+            self.assertTrue(any(os.path.isfile(os.path.join(RES, f, d + e)) for f in ("drawable", "drawable-nodpi") for e in (".xml", ".png")), d)
         info = open(os.path.join(RES, "xml", "widget_search_info.xml"), encoding="utf-8").read()
         self.assertIn("@layout/widget_search", info)
         mf = open(os.path.join(ROOT, "android", "app", "src", "main", "AndroidManifest.xml"), encoding="utf-8").read()

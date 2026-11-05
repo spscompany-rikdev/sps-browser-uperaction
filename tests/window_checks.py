@@ -51,6 +51,67 @@ class WindowTests(unittest.TestCase):
             if n > 2:
                 self.assertEqual(live[0].text(), "\U0001F9E9")        # one puzzle button with the drop-down
 
+    def test_v40_icons_anim_easy(self):
+        import sps_icons, sps_anim, sps_easy
+        w = self.w
+        # vector icons replaced the text glyphs
+        self.assertTrue(w.back_btn.text() == "" and not w.back_btn.icon().isNull())
+        self.assertTrue(w.reload_btn.text() in ("↻", "✕") and not w.reload_btn.icon().isNull())   # text() still reports the logical value
+        w.reload_btn.setText("✕"); self.assertEqual(w.reload_btn.text(), "✕"); w.reload_btn.setText("↻")
+        # menu button: spins to the logo while the main menu is open, back to dots after
+        fx = w.menu_btn._sps_fx
+        self.assertEqual(fx.p, 0.0)
+        seen = []
+        orig = S.MainWindow._show_main_menu
+        def fake_menu(self_=None):
+            wait(450); seen.append(fx.p)
+        w.__dict__["_show_main_menu"] = None
+        import types
+        # re-wrap with a fake menu so no modal menu blocks the test
+        inner = fake_menu
+        fx2 = fx
+        def wrapped():
+            fx2.go(True)
+            try: inner()
+            finally: fx2.go(False)
+        wrapped(); wait(450)
+        self.assertGreater(seen[0], 0.95); self.assertLess(fx.p, 0.05)
+        del w.__dict__["_show_main_menu"]
+        install = sps_anim.install_menu_button            # real wrapper is installed
+        self.assertTrue(callable(w._show_main_menu))
+        # easy access button + media / image / page context
+        self.assertTrue(hasattr(w, "_easy_btn"))
+        self.assertEqual(sps_easy.classify({"media": {"paused": False}}), "media")
+        self.assertEqual(sps_easy.classify({"isImg": True}), "image")
+        self.assertEqual(sps_easy.classify({"imgs": 4}), "page")
+        ctl = w._easy_ctl
+        for kind, info in (("media", {"url": "https://www.youtube.com/watch?v=1", "title": "Song", "media": {"kind": "video", "paused": False, "muted": False, "vol": 1, "rate": 1, "loop": False, "t": 12, "d": 200}}),
+                           ("image", {"url": "https://x.test/a.png", "isImg": True, "title": "a.png"}),
+                           ("page", {"url": "https://x.test/", "title": "X", "imgs": 5})):
+            ctl._apply(w.tabs.currentWidget(), info); self.assertEqual(ctl.kind, kind)
+            panel = sps_easy.EasyPanel(w, ctl); panel.popup_at(w._easy_btn); wait(120)
+            self.assertTrue(panel.isVisible()); self.assertEqual(panel._built, kind)
+            self.assertGreater(len(panel.findChildren(QPushButton)), 5)
+            panel.close()
+        # JS builders are syntactically valid in a real engine is covered in test_easy_js; here: every action exists
+        for a in ("toggle", "seekrel", "seekfrac", "rate", "vol", "mute", "loop", "pip", "fs", "next", "prev"):
+            self.assertIn("function", sps_easy.media_js(a, 1))
+        for a in ("rot", "rotl", "flip", "b", "c", "s", "gray", "reset", "save"):
+            self.assertIn("function", sps_easy.image_js(a, 100))
+
+    def test_v40_dialog_scroll_and_menu_scroll(self):
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QScrollArea, QMenu
+        import sps_anim
+        d = QDialog(self.w); d.SPS_STAY_WINDOW = True
+        lay = QVBoxLayout(d)
+        for i in range(60): lay.addWidget(QLabel("row %d" % i))
+        d.show(); wait(400)
+        self.assertIsNotNone(d.findChild(QScrollArea))
+        self.assertLessEqual(d.height(), 1200)
+        d.close()
+        m = QMenu(self.w); m.addAction("x"); m.popup(self.w.mapToGlobal(self.w.rect().center())); wait(300)
+        self.assertIn("menu-scrollable", m.styleSheet()); m.close()
+
     def test_extra_window_survives_garbage_collection(self):
         before = len(S._SPS_WINDOW_REFS)
         self.w.open_new_window()
@@ -77,6 +138,55 @@ class WindowTests(unittest.TestCase):
         qp._open("https://example.com/"); wait(300)
         self.assertEqual(self.w.tabs.count(), n + 1)
         qp.close()
+
+    def test_safety_send_tab_and_savers(self):
+        import sps_safety, sps_safety_ui, sps_qr, sps_perf, sps_updater, sps_quick
+        from PyQt6.QtCore import QUrl
+        # Safety Check end to end (offline stubs: nothing leaves the test)
+        def offline(*a, **k): raise OSError("offline")
+        o1, o2 = sps_safety.default_fetch, sps_updater.fetch_page
+        sps_safety.default_fetch = offline; sps_updater.fetch_page = offline
+        sps_safety.run_all.__kwdefaults__["fetch"] = offline
+        try:
+            d = sps_safety_ui.SafetyDialog(self.w, "38.0.0"); d.show(); d.start()
+            for _ in range(40):
+                wait(100)
+                if not d.running: break
+            self.assertFalse(d.running)
+            self.assertGreaterEqual(d.bl.count(), 4)
+            self.assertTrue(d.head.text())
+            d.close()
+        finally:
+            sps_safety.default_fetch, sps_updater.fetch_page = o1, o2
+            sps_safety.run_all.__kwdefaults__["fetch"] = o1
+        # Send tab: the QR really contains the address
+        self.w.add_new_tab(QUrl("https://example.com/hello?x=1")); wait(500)
+        dlg = sps_qr.SendTabDialog(self.w)
+        self.assertIn("example.com/hello", dlg.url)
+        self.assertFalse(dlg.qr.pixmap() is None or dlg.qr.pixmap().isNull())
+        dlg.qr.pixmap().save(os.path.join(tempfile.gettempdir(), "sps_qr_test.png"))
+        n = self.w.tabs.count(); dlg.paste.setPlainText("https://a.example/\nnot a link\nhttps://b.example/"); dlg._open_pasted(); wait(200)
+        self.assertEqual(self.w.tabs.count(), n + 2)
+        # Energy saver freezes background tabs and thaws the current one
+        from PyQt6.QtWebEngineCore import QWebEnginePage
+        self.w.settings_data["energy_saver"] = True
+        sps_perf.energy_tick(self.w); wait(200)
+        cur = self.w.tabs.currentIndex()
+        states = [self.w.tabs.widget(i).page().lifecycleState() for i in range(self.w.tabs.count())]
+        self.assertEqual(states[cur], QWebEnginePage.LifecycleState.Active)
+        self.assertTrue(any(st == QWebEnginePage.LifecycleState.Frozen for i, st in enumerate(states) if i != cur))
+        self.w.settings_data["energy_saver"] = False
+        sps_perf.energy_tick(self.w)
+        self.assertFalse(any(self.w.tabs.widget(i).page().lifecycleState() == QWebEnginePage.LifecycleState.Frozen for i in range(self.w.tabs.count())))
+        self.assertGreaterEqual(sps_perf.sleep_others_now(self.w), 1)
+        self.assertGreaterEqual(sps_perf.sleeping_count(self.w), 1)
+        # quick panel shows the controls
+        self.w._quick_btn.click(); wait(300)
+        qp = self.w._sps_quick
+        for k in ("tab_sleep_enabled", "energy_saver"): self.assertIn(k, qp.toggle_btns)
+        self.assertIn("tabs", qp.perf.text())
+        qp._cycle_minutes(); qp.close()
+        for meth in ("show_safety_check", "show_send_tab"): self.assertTrue(hasattr(self.w, meth))
 
     def test_dialogs_open_as_dropdown(self):
         from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel

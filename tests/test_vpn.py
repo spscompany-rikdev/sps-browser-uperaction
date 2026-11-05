@@ -280,6 +280,8 @@ class AndroidUiTests(unittest.TestCase):
         import re
         for line in open(os.path.join(self.ROOT, "assets", "icons.txt"), encoding="utf-8"):
             name, ops = line.rstrip("\n").split("|", 1)
+            if ops.startswith("S "):                                  # Material path data, parsed by SvgPath.java (tested in test_android_icons)
+                self.assertRegex(ops[2:], r"^[MmLlHhVvCcSsQqTtAaZz0-9eE.,\s+-]+$", name); continue
             toks = ops.split()
             self.assertTrue(toks and toks[0] in ("M", "N", "C", "F", "A", "R"), name)
             for t in toks:
@@ -317,3 +319,29 @@ class HelperAutoFetchTests(unittest.TestCase):
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self.assertIn("--strict", open(os.path.join(root, "tools", "ci_build.py"), encoding="utf-8").read())
         self.assertIn("sps_vpn_fetch", open(os.path.join(root, "SPS_Browser.spec"), encoding="utf-8").read())
+
+
+class WindowsArmFetchTests(unittest.TestCase):
+    """The GitHub Windows-ARM runner has no wireproxy/Tor ARM builds: the x64 ones (run emulated) must be used."""
+    def test_arm_falls_back_to_x64(self):
+        import io, tarfile, platform
+        import sps_vpn_fetch as F
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as t:
+            data = b"MZ-fake"; ti = tarfile.TarInfo("wireproxy.exe"); ti.size = len(data); t.addfile(ti, io.BytesIO(data))
+        blob, asked = buf.getvalue(), []
+
+        def fake_get(url, timeout=120, tries=3):
+            asked.append(url)
+            if "arm64" in url:
+                raise RuntimeError("HTTP Error 404")
+            return blob
+        o_get, o_sys, o_mach = F._get, platform.system, platform.machine
+        try:
+            F._get = fake_get; platform.system = lambda: "Windows"; platform.machine = lambda: "ARM64"
+            d = tempfile.mkdtemp()
+            path = F.fetch_wireproxy(d)
+        finally:
+            F._get, platform.system, platform.machine = o_get, o_sys, o_mach
+        self.assertTrue(path.endswith("wireproxy.exe") and os.path.isfile(path))
+        self.assertTrue(any("windows_arm64" in u for u in asked) and any("windows_amd64" in u for u in asked))
