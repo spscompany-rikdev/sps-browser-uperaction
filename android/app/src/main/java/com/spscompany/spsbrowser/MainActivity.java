@@ -599,6 +599,8 @@ public class MainActivity extends Activity implements Host {
             @Override
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
                 String reqHost = request.getUrl().getHost();
+                // FAST PATH: YouTube's own video / image servers are never filtered (and checking them for every video chunk made starts slower)
+                if (reqHost != null && (reqHost.endsWith("googlevideo.com") || reqHost.endsWith("ytimg.com") || reqHost.endsWith("ggpht.com"))) return null;
                 String pageHost = UI.hostOf(tab.url);
                 if (adBlock && ytShield && !request.isForMainFrame() && isYoutubeAdRequest(request.getUrl()) && !shieldOff.contains(pageHost)) {
                     blockedCount.incrementAndGet();
@@ -1133,29 +1135,63 @@ public class MainActivity extends Activity implements Host {
 
     private interface BitmapCb { void got(Bitmap b); }
 
-    /** PixelCopy (reads what is really on screen, works with the hardware-accelerated WebView); View.draw only as a fallback. */
-    private void captureArea(final View v, android.graphics.Rect r, final BitmapCb cb) {
+    /** True when (almost) every sampled pixel is white/transparent - i.e. the capture did not get the page. */
+    static boolean looksBlank(Bitmap b) {
+        if (b == null || b.getWidth() < 1 || b.getHeight() < 1) return true;
+        int stepX = Math.max(1, b.getWidth() / 24), stepY = Math.max(1, b.getHeight() / 24), seen = 0, blank = 0;
+        for (int y = 0; y < b.getHeight(); y += stepY)
+            for (int x = 0; x < b.getWidth(); x += stepX) {
+                int c = b.getPixel(x, y);
+                seen++;
+                if (Color.alpha(c) < 16 || ((c & 0xFFFFFF) >= 0xFAFAFA)) blank++;
+            }
+        return seen > 0 && blank == seen;
+    }
+
+    /**
+     * Captures a part of a WebView. The page used to come out as a white picture, so this is done in layers:
+     * 1) wait a moment (the dimming layer must be gone from the screen), 2) PixelCopy of the whole window, cropped
+     * (reads what is really on screen), 3) if that is blank, View.draw on a software canvas; 4) still blank -> null (the caller says so).
+     */
+    private void captureArea(final View v, final android.graphics.Rect r, final BitmapCb cb) {
+        v.postDelayed(() -> captureAreaNow(v, r, cb), 180);
+    }
+
+    private void captureAreaNow(final View v, android.graphics.Rect r, final BitmapCb cb) {
         try {
             final int[] loc = new int[2];
             v.getLocationInWindow(loc);
-            int l = Math.max(0, r.left), tp = Math.max(0, r.top);
-            int w = Math.min(v.getWidth() - l, r.width()), h = Math.min(v.getHeight() - tp, r.height());
+            final int l = Math.max(0, r.left), tp = Math.max(0, r.top);
+            final int w = Math.min(v.getWidth() - l, r.width()), h = Math.min(v.getHeight() - tp, r.height());
             if (w < 12 || h < 12) { cb.got(null); return; }
-            // keep memory sane: very big boxes are captured at most 4000 px wide/high
-            if (w > 4000 || h > 4000) { cb.got(null); return; }
-            final Bitmap out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
-            final android.graphics.Rect src = new android.graphics.Rect(loc[0] + l, loc[1] + tp, loc[0] + l + w, loc[1] + tp + h);
+            if (w > 4000 || h > 4000) { cb.got(null); return; }                    // keep memory sane
+            final Runnable fallback = () -> {
+                try {
+                    Bitmap out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+                    android.graphics.Canvas c = new android.graphics.Canvas(out);
+                    c.drawColor(Color.WHITE);
+                    c.translate(-l, -tp);
+                    v.draw(c);
+                    cb.got(looksBlank(out) ? null : out);
+                } catch (Throwable e) { cb.got(null); }
+            };
             if (android.os.Build.VERSION.SDK_INT >= 26) {
-                android.view.PixelCopy.request(getWindow(), src, out, res -> {
-                    cb.got(res == android.view.PixelCopy.SUCCESS ? out : null);
+                View decor = getWindow().getDecorView();
+                if (decor.getWidth() < 1 || decor.getHeight() < 1) { fallback.run(); return; }
+                final Bitmap win = Bitmap.createBitmap(decor.getWidth(), decor.getHeight(), Bitmap.Config.ARGB_8888);
+                android.view.PixelCopy.request(getWindow(), win, res -> {
+                    try {
+                        if (res == android.view.PixelCopy.SUCCESS) {
+                            int x = Math.max(0, Math.min(win.getWidth() - 1, loc[0] + l)), y = Math.max(0, Math.min(win.getHeight() - 1, loc[1] + tp));
+                            Bitmap crop = Bitmap.createBitmap(win, x, y, Math.min(w, win.getWidth() - x), Math.min(h, win.getHeight() - y));
+                            if (!looksBlank(crop)) { cb.got(crop); return; }
+                        }
+                    } catch (Throwable ignored) { }
+                    fallback.run();
                 }, new android.os.Handler(android.os.Looper.getMainLooper()));
                 return;
             }
-            android.graphics.Canvas c = new android.graphics.Canvas(out);
-            c.drawColor(Color.WHITE);
-            c.translate(-l, -tp);
-            v.draw(c);
-            cb.got(out);
+            fallback.run();
         } catch (Throwable e) {
             cb.got(null);
         }
@@ -2999,23 +3035,57 @@ public class MainActivity extends Activity implements Host {
     private void readAloud() {
         if (current == null || isNewTab(current.url)) { toast("Open a page first"); return; }
         if (tts != null && ttsSpeaking) { tts.stop(); ttsSpeaking = false; toast("Stopped"); return; }
-        current.web.evaluateJavascript("(function(){var t=document.body?document.body.innerText:'';return t.substring(0,6000);})()", value -> {
+        // selected text is read first; otherwise the main text of the page
+        current.web.evaluateJavascript("(function(){var s=window.getSelection?String(window.getSelection()):'';if(s&&s.trim())return s;"
+                + "var m=document.querySelector('article,main,[role=main]');var t=(m&&m.innerText&&m.innerText.length>400?m:document.body||document.documentElement).innerText||'';return t.substring(0,20000);})()", value -> {
             String text = "";
             try { Object o = new org.json.JSONTokener(value == null ? "\"\"" : value).nextValue(); text = o == null ? "" : String.valueOf(o); } catch (Exception ignored) { }
             if (text.trim().isEmpty()) { toast("Nothing to read on this page"); return; }
-            final String say = text;
+            final String say = text.replaceAll("\\s+", " ").trim();
             if (tts == null) {
-                tts = new android.speech.tts.TextToSpeech(getApplicationContext(), status -> {
-                    if (status == android.speech.tts.TextToSpeech.SUCCESS) { tts.setLanguage(Locale.getDefault()); speak(say); }
-                    else { toast("Text-to-speech is not available on this phone"); tts = null; }
+                final android.speech.tts.TextToSpeech[] box = new android.speech.tts.TextToSpeech[1];
+                box[0] = new android.speech.tts.TextToSpeech(getApplicationContext(), status -> {
+                    if (status == android.speech.tts.TextToSpeech.SUCCESS && box[0] != null) {
+                        tts = box[0];
+                        int r = tts.setLanguage(Locale.getDefault());
+                        if (r == android.speech.tts.TextToSpeech.LANG_MISSING_DATA || r == android.speech.tts.TextToSpeech.LANG_NOT_SUPPORTED)
+                            tts.setLanguage(Locale.US);                          // phone has no voice for this language: English
+                        tts.setOnUtteranceProgressListener(new android.speech.tts.UtteranceProgressListener() {
+                            @Override public void onStart(String id) { }
+                            @Override public void onDone(String id) { if ("sps-read-last".equals(id)) ttsSpeaking = false; }
+                            @Override public void onError(String id) { ttsSpeaking = false; }
+                        });
+                        speak(say);
+                    } else {
+                        toast("No text-to-speech engine found. Install or enable one in Settings > Accessibility > Text-to-speech.");
+                        try { if (box[0] != null) box[0].shutdown(); } catch (Exception ignored) { }
+                        tts = null;
+                    }
                 });
             } else speak(say);
         });
     }
 
+    /** The engine refuses more than ~4000 characters in one go (and answers with an error, i.e. silence) - so read in pieces. */
     private void speak(String text) {
+        int max = 3500;
+        try { max = Math.max(500, android.speech.tts.TextToSpeech.getMaxSpeechInputLength() - 200); } catch (Throwable ignored) { }
+        java.util.List<String> parts = new ArrayList<>();
+        String rest = text;
+        while (rest.length() > max) {
+            int cut = rest.lastIndexOf(". ", max);
+            if (cut < max / 2) cut = rest.lastIndexOf(' ', max);
+            if (cut < 1) cut = max;
+            parts.add(rest.substring(0, cut + 1).trim());
+            rest = rest.substring(cut + 1).trim();
+        }
+        if (!rest.isEmpty()) parts.add(rest);
         ttsSpeaking = true;
-        tts.speak(text, android.speech.tts.TextToSpeech.QUEUE_FLUSH, null, "sps-read");
+        for (int i = 0; i < parts.size(); i++) {
+            boolean last = i == parts.size() - 1;
+            int rc = tts.speak(parts.get(i), i == 0 ? android.speech.tts.TextToSpeech.QUEUE_FLUSH : android.speech.tts.TextToSpeech.QUEUE_ADD, null, last ? "sps-read-last" : "sps-read-" + i);
+            if (rc != android.speech.tts.TextToSpeech.SUCCESS) { ttsSpeaking = false; toast("The voice engine could not start reading"); return; }
+        }
         toast("Reading aloud - open the menu to stop");
     }
 

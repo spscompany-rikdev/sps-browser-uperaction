@@ -16,6 +16,11 @@
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
     <uses-feature android:name="android.hardware.location" android:required="false" />
 
+    <!-- Android 11+ hides other apps from us unless declared: without this the phone's text-to-speech engine cannot be found (Read aloud) -->
+    <queries>
+        <intent><action android:name="android.intent.action.TTS_SERVICE" /></intent>
+    </queries>
+
     <application
         android:allowBackup="false"
         android:networkSecurityConfig="@xml/network_security_config"
