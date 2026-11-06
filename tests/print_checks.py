@@ -41,10 +41,10 @@ class PrintAreaTests(unittest.TestCase):
         sel = dlg._selector
         self.assertIsNotNone(sel)
         self.assertFalse(dlg.isVisible())                     # hidden while dragging ...
-        mouse(sel, QEvent.Type.MouseButtonPress, QPoint(20, 20))
-        mouse(sel, QEvent.Type.MouseMove, QPoint(200, 150))
-        mouse(sel, QEvent.Type.MouseButtonRelease, QPoint(200, 150))
-        wait(500)
+        drag = ("var o=document.getElementById('__sps_area');function ev(t,x,y){o.dispatchEvent(new MouseEvent(t,{clientX:x,clientY:y,bubbles:true}))}"
+                "ev('mousedown',20,20);ev('mousemove',200,150);ev('mouseup',200,150);")
+        view.page().runJavaScript(drag)
+        wait(1200)
         self.assertTrue(dlg.isVisible())                      # ... and back afterwards (this was the bug)
         self.assertIsNotNone(dlg._pixmap); self.assertFalse(dlg._pixmap.isNull())
         self.assertIs(win._sps_print_dlg, dlg); self.assertTrue(dlg.save_img.isEnabled())
@@ -56,8 +56,8 @@ class PrintAreaTests(unittest.TestCase):
         view = QWebEngineView(); view.setHtml("<p>x</p>"); win.tabs.addTab(view, "t"); win.resize(600, 500); win.show(); wait(500)
         dlg = sps_print.show_print_dialog(win, start_area=True); wait(900)
         self.assertIsNotNone(dlg._selector)
-        sps_print.AreaSelector.keyPressEvent(dlg._selector, type("E", (), {"key": lambda s: Qt.Key.Key_Escape})())
-        wait(200)
+        view.page().runJavaScript("document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))")
+        wait(900)
         self.assertTrue(dlg.isVisible()); dlg.close(); win.close()
 
 

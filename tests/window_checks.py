@@ -99,6 +99,34 @@ class WindowTests(unittest.TestCase):
         for a in ("rot", "rotl", "flip", "b", "c", "s", "gray", "reset", "save"):
             self.assertIn("function", sps_easy.image_js(a, 100))
 
+    def test_v40_easy_gesture_and_scroll(self):
+        import sps_easy
+        from PyQt6.QtWidgets import QScrollArea
+        w = self.w; view = w.tabs.currentWidget()
+        from PyQt6.QtCore import QObject, QEvent, Qt as _Qt
+        seen = []
+        class Spy(QObject):
+            def eventFilter(self, o, e):
+                if e.type() == QEvent.Type.KeyPress: seen.append(e.key())
+                return False
+        spy = Spy(); tgt = view.focusProxy() or view; tgt.installEventFilter(spy)
+        fired = []
+        sps_easy.give_gesture(view, lambda: fired.append(1)); wait(800)
+        tgt.removeEventFilter(spy)
+        # a real key press reaches the page (that is what lets Chromium allow fullscreen / picture-in-picture), then the JS runs
+        self.assertIn(int(_Qt.Key.Key_F13), seen); self.assertEqual(fired, [1])
+        # (the page-side effect - navigator.userActivation.isActive becoming true - was checked by hand on a real QtWebEngine page)
+        ctl = w._easy_ctl
+        ctl._apply(view, {"url": "https://x.test/", "title": "t", "media": {"kind": "video", "paused": False, "t": 1, "d": 9, "vol": 1, "rate": 1}})
+        p = sps_easy.EasyPanel(w, ctl); p.popup_at(w._easy_btn); wait(150)
+        self.assertIsNotNone(p.findChild(QScrollArea))
+        y0 = p.y(); h0 = p.height()
+        p._set_rate(1.5, p.speed_btns[4]); wait(200)
+        self.assertEqual(p.y(), y0); self.assertEqual(p.height(), h0)   # clicking speed never moves or resizes the panel
+        p._toggle_loop(); self.assertTrue(p.loop_b.property("on"))
+        self.assertLessEqual(p.height(), 1200)
+        p.close()
+
     def test_v40_dialog_scroll_and_menu_scroll(self):
         from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QScrollArea, QMenu
         import sps_anim
@@ -239,10 +267,28 @@ class WindowTests(unittest.TestCase):
         self.assertEqual(g._load_bookmarks(), [])
         n = len(g._load_history()); g._save_history("https://example.com/", "x")
         self.assertEqual(len(g._load_history()), n)                    # nothing written for a guest
-        self.assertGreaterEqual(g.tabs.count(), 1)
+        self.assertEqual(g.tabs.count(), 1)                            # only the private New Tab (no stray tab on the saved profile)
+        self.assertTrue(g.tabs.widget(0).page().profile().isOffTheRecord())
+        self.assertFalse(hasattr(g, "tray"))                           # no second tray icon
         wait(800)
         self.assertIn("sps_newtab_", g.tabs.currentWidget().url().toString())   # a real New Tab page, not a blank tab
         g.hide()
+
+    def test_google_signin_is_caught_before_loading(self):
+        import sps_signin
+        shown = []
+        orig = S.MainWindow._v40_google_signin_notice
+        S.MainWindow._v40_google_signin_notice = lambda self_, url, page: shown.append(url.toString())
+        try:
+            pg = self.w.tabs.currentWidget().page()
+            blocked = pg.acceptNavigationRequest(QUrl("https://accounts.google.com/v3/signin/identifier"), pg.NavigationType.NavigationTypeTyped, True)
+            fine = pg.acceptNavigationRequest(QUrl("https://www.youtube.com/"), pg.NavigationType.NavigationTypeTyped, True)
+            sub = pg.acceptNavigationRequest(QUrl("https://accounts.google.com/v3/signin/x"), pg.NavigationType.NavigationTypeTyped, False)
+            wait(100)
+        finally:
+            S.MainWindow._v40_google_signin_notice = orig
+        self.assertFalse(blocked); self.assertTrue(fine); self.assertTrue(sub)    # sub-frames are left alone
+        self.assertEqual(len(shown), 1)
 
 
 if __name__ == "__main__":

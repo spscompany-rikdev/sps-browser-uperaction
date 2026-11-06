@@ -78,3 +78,30 @@ class WiringTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FixTests(unittest.TestCase):
+    """Regression guards for the problems found on real devices."""
+    def test_capture_has_blank_detection(self):
+        m = open(os.path.join(JAVA, "MainActivity.java"), encoding="utf-8").read()
+        self.assertIn("looksBlank", m); self.assertIn("captureAreaNow", m)
+
+    def test_installer_launches_app_as_normal_user(self):
+        iss = open(os.path.join(os.path.dirname(__file__), "..", "installer", "SPS_Browser_Setup.iss"), encoding="utf-8").read()
+        line = [l for l in iss.splitlines() if "postinstall" in l and l.startswith("Filename")][0]
+        self.assertIn("runasoriginaluser", line)
+        main = open(os.path.join(os.path.dirname(__file__), "..", "src", "main.py"), encoding="utf-8").read()
+        self.assertIn("_drop_admin_rights", main)
+        upd = open(os.path.join(os.path.dirname(__file__), "..", "src", "sps_updater.py"), encoding="utf-8").read()
+        self.assertIn("_run_copy", upd); self.assertIn("last_error", upd)
+
+
+class SpeedAndMediaFixTests(unittest.TestCase):
+    def test_fast_paths_and_read_aloud(self):
+        m = open(os.path.join(JAVA, "MainActivity.java"), encoding="utf-8").read()
+        self.assertIn('endsWith("googlevideo.com")', m)
+        self.assertIn("getMaxSpeechInputLength", m); self.assertIn("LANG_NOT_SUPPORTED", m)
+        man = open(os.path.join(ROOT, "AndroidManifest.xml"), encoding="utf-8").read()
+        self.assertIn("android.intent.action.TTS_SERVICE", man); self.assertIn("<queries>", man)
+        d = open(os.path.join(os.path.dirname(__file__), "..", "src", "SPS_BROWSER.py"), encoding="utf-8").read()
+        self.assertIn("_YT_FAST_HOSTS", d); self.assertIn("FAST PATH (YouTube start-up speed)", d)
