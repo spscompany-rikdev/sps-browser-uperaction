@@ -2,7 +2,7 @@
 headers/footers, background graphics, two-sided - and "Selected area": drag a box on the page and print only that part."""
 import json, os, tempfile, datetime
 
-from PyQt6.QtCore import Qt, QTimer, QRect, QPoint, QMarginsF, QSizeF, QUrl, pyqtSignal
+from PyQt6.QtCore import QObject, Qt, QTimer, QRect, QPoint, QMarginsF, QSizeF, QUrl, pyqtSignal
 from PyQt6.QtGui import QPainter, QColor, QPen, QPageLayout, QPageSize, QPdfWriter, QPixmap, QCursor
 from PyQt6.QtWidgets import (QDialog, QWidget, QHBoxLayout, QVBoxLayout, QFormLayout, QComboBox, QSpinBox, QCheckBox, QLabel,
                              QPushButton, QLineEdit, QFileDialog, QMessageBox, QGroupBox, QApplication, QScrollArea)
@@ -100,54 +100,90 @@ def print_css(scale_percent, header_footer, title, url):
     return css
 
 
-class AreaSelector(QWidget):
-    """Dims the page; drag a box; release = done; Esc = cancel."""
+AREA_JS = r"""(function(){
+ if(window.__spsAreaEl){window.__spsAreaEl.remove();}
+ window.__spsArea=null;
+ var o=document.createElement('div'); window.__spsAreaEl=o; o.id='__sps_area';
+ o.style.cssText='position:fixed;left:0;top:0;width:100vw;height:100vh;z-index:2147483647;cursor:crosshair;background:rgba(0,0,0,.30);user-select:none;touch-action:none;font:600 14px system-ui;color:#fff;';
+ var hint=document.createElement('div'); hint.textContent='Drag a box around the part you want to print  (Esc = cancel)';
+ hint.style.cssText='position:absolute;top:14px;left:0;right:0;text-align:center;text-shadow:0 1px 3px #000;pointer-events:none';
+ var box=document.createElement('div'); box.style.cssText='position:absolute;display:none;border:2px solid #1a73e8;box-shadow:0 0 0 100000px rgba(0,0,0,.45);background:transparent;pointer-events:none';
+ var lab=document.createElement('div'); lab.style.cssText='position:absolute;left:0;top:-22px;background:#1a73e8;color:#fff;font-size:12px;padding:2px 6px;border-radius:6px;white-space:nowrap';
+ box.appendChild(lab); o.appendChild(hint); o.appendChild(box);
+ var sx=0,sy=0,drag=false,r=null;
+ function rect(x,y){return {x:Math.min(sx,x),y:Math.min(sy,y),w:Math.abs(x-sx),h:Math.abs(y-sy)};}
+ function end(v){o.remove();window.__spsAreaEl=null;document.removeEventListener('keydown',key,true);window.__spsArea=v;}
+ function key(e){if(e.key==='Escape'){e.preventDefault();e.stopPropagation();end('cancel');}}
+ o.addEventListener('mousedown',function(e){e.preventDefault();drag=true;sx=e.clientX;sy=e.clientY;hint.style.display='none';o.style.background='transparent';box.style.display='block';});
+ o.addEventListener('mousemove',function(e){if(!drag)return;r=rect(e.clientX,e.clientY);box.style.left=r.x+'px';box.style.top=r.y+'px';box.style.width=r.w+'px';box.style.height=r.h+'px';lab.textContent=Math.round(r.w)+' x '+Math.round(r.h);});
+ o.addEventListener('mouseup',function(e){if(!drag)return;drag=false;r=rect(e.clientX,e.clientY);
+   if(r.w<8||r.h<8){box.style.display='none';hint.style.display='block';o.style.background='rgba(0,0,0,.30)';return;}
+   end(r);});
+ document.addEventListener('keydown',key,true);
+ document.documentElement.appendChild(o);
+})()"""
+
+
+class AreaSelector(QObject):
+    """Area selection drawn INSIDE the page (a DOM overlay) instead of a widget on top of the web view.
+    A translucent widget over QWebEngineView froze some Windows machines (GPU compositor); the DOM overlay cannot.
+    Drag a box; release = done (signal `chosen` with a QRect in view pixels); Esc = cancel."""
     chosen = pyqtSignal(QRect)
     cancelled = pyqtSignal()
 
     def __init__(self, view):
         super().__init__(view)
-        self.setGeometry(view.rect())
-        self.setCursor(QCursor(Qt.CursorShape.CrossCursor))
-        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self._a = self._b = None
-        self.show(); self.raise_(); self.setFocus()
+        self.view = view
+        self._done = False
+        self._ticks = 0
+        self.timer = QTimer(self); self.timer.setInterval(120); self.timer.timeout.connect(self._poll)
+        try:
+            view.page().runJavaScript(AREA_JS)
+        except Exception:
+            QTimer.singleShot(0, self._cancel); return
+        self.timer.start()
 
-    def _rect(self):
-        return QRect(self._a, self._b).normalized() if self._a and self._b else QRect()
+    def _finish(self):
+        self._done = True; self.timer.stop()
 
-    def paintEvent(self, ev):
-        p = QPainter(self)
-        r = self._rect()
-        p.fillRect(self.rect(), QColor(0, 0, 0, 110))
-        if not r.isNull():
-            p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
-            p.fillRect(r, Qt.GlobalColor.transparent)
-            p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
-            p.setPen(QPen(QColor("#1a73e8"), 2)); p.drawRect(r)
-            p.setPen(QColor("white")); p.drawText(r.topLeft() + QPoint(4, -6), "%d x %d" % (r.width(), r.height()))
-        else:
-            p.setPen(QColor("white")); p.drawText(self.rect().adjusted(0, 20, 0, 0), Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
-                                                  "Drag a box around the part you want to print  (Esc = cancel)")
+    def _cancel(self):
+        if not self._done:
+            self._finish(); self.cancelled.emit()
 
-    def mousePressEvent(self, ev):
-        self._a = ev.position().toPoint(); self._b = self._a; self.update()
+    def _poll(self):
+        self._ticks += 1
+        if self._ticks > 1000:                        # ~2 minutes without an answer
+            self.cancel_selection(); return
+        try:
+            self.view.page().runJavaScript("window.__spsArea===undefined?'none':JSON.stringify(window.__spsArea)", self._got)
+        except Exception:
+            self._cancel()
 
-    def mouseMoveEvent(self, ev):
-        if self._a:
-            self._b = ev.position().toPoint(); self.update()
+    def _got(self, res):
+        if self._done or res in (None, "none", "null"):
+            return
+        if res == '"cancel"':
+            self._cancel(); return
+        try:
+            import json
+            d = json.loads(res)
+            z = 1.0
+            try: z = float(self.view.zoomFactor())
+            except Exception: pass
+            r = QRect(int(d["x"] * z), int(d["y"] * z), max(1, int(d["w"] * z)), max(1, int(d["h"] * z)))
+        except Exception:
+            self._cancel(); return
+        self._finish(); self.chosen.emit(r)
 
-    def mouseReleaseEvent(self, ev):
-        r = self._rect()
-        if r.width() < 8 or r.height() < 8:
-            self._a = self._b = None; self.update(); return
-        self.hide()
-        self.chosen.emit(r)
+    def cancel_selection(self):
+        try:
+            self.view.page().runJavaScript("(function(){var o=window.__spsAreaEl;if(o)o.remove();window.__spsAreaEl=null;window.__spsArea='cancel'})()")
+        except Exception:
+            pass
+        self._cancel()
 
-    def keyPressEvent(self, ev):
-        if ev.key() == Qt.Key.Key_Escape:
-            self.hide(); self.cancelled.emit()
+    def deleteLater(self):
+        self._finish(); super().deleteLater()
 
 
 class SpsPrintDialog(QDialog):
@@ -428,7 +464,6 @@ class SpsPrintDialog(QDialog):
             return
         self.setWindowModality(Qt.WindowModality.NonModal)
         self.hide()
-        QApplication.processEvents()
         try:
             self.win.raise_(); self.win.activateWindow()
         except Exception:
@@ -449,7 +484,9 @@ class SpsPrintDialog(QDialog):
     def _area_chosen(self, rect):
         if self._selector is not None:
             self._selector.deleteLater(); self._selector = None
-        QApplication.processEvents()
+        QTimer.singleShot(60, lambda: self._grab_area(rect))        # let the overlay disappear from the page first
+
+    def _grab_area(self, rect):
         pm = self.view.grab(rect)
         if pm.isNull():
             pm = self.win.grab().copy(QRect(self.view.mapTo(self.win, rect.topLeft()), rect.size()))

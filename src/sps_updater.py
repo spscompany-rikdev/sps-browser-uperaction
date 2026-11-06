@@ -215,6 +215,26 @@ def sha256_file(path):
     return h.hexdigest()
 
 
+_HASH_CACHE = {}
+_HASH_LOCK = threading.Lock()
+
+
+def sha256_file_cached(path):
+    """Same result as sha256_file, but a file that did not change (same size + modification time) is hashed only once.
+    Hashing a 100+ MB installer again and again (start-up check, 'Update now', copy check) froze the window."""
+    st = os.stat(path)
+    key = (os.path.abspath(path), st.st_size, st.st_mtime_ns)
+    with _HASH_LOCK:
+        hit = _HASH_CACHE.get(key)
+    if hit:
+        return hit
+    digest = sha256_file(path)
+    with _HASH_LOCK:
+        _HASH_CACHE.clear()                                   # only the newest installer matters
+        _HASH_CACHE[key] = digest
+    return digest
+
+
 # ───────────────────────────── the updater ─────────────────────────────
 class SpsUpdater:
     def __init__(self, current_version, data_dir, page_url=SPS_UPDATE_PAGE, public_key_hex=None, log=None):
@@ -224,6 +244,7 @@ class SpsUpdater:
         self.key = public_key_hex
         self._log = log or (lambda msg: None)
         self._thread = None
+        self.last_error = ""
         self._stop = threading.Event()
         os.makedirs(self.dir, exist_ok=True)
 
@@ -268,7 +289,7 @@ class SpsUpdater:
             info["size"] = int(info["size"])
             if os.path.getsize(path) != info["size"] or not verify_signature(info, self.key):
                 return None
-            if not hmac.compare_digest(sha256_file(path), info["sha256"].lower()):
+            if not hmac.compare_digest(sha256_file_cached(path), info["sha256"].lower()):
                 return None
             info["path"] = path
             return info
@@ -355,30 +376,78 @@ class SpsUpdater:
         if sys.platform != "win32" or not os.path.isfile(path):
             self._log("installer start refused: file missing or not Windows: %r" % path)
             return None
-        if not hmac.compare_digest(sha256_file(path), info["sha256"].lower()) or not verify_signature(info, self.key):
+        if not hmac.compare_digest(sha256_file_cached(path), info["sha256"].lower()) or not verify_signature(info, self.key):
             self._log("installer start refused: SHA-256 or signature check failed")
             return None
         return path
 
-    def launch_installer(self, info):
-        """Start the verified installer (Windows asks for administrator permission once). True on success.
-        The installer writes its own log next to the download (update_install.log) and shows a small progress window."""
-        path = self._verified_path(info)
-        if not path:
-            return False
-        import ctypes
-        folder = os.path.dirname(path)
-        params = " ".join(SILENT_ARGS + ['/LOG="%s"' % os.path.join(folder, "update_install.log")])
-        rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", path, params, folder, 1)    # 1 = normal window
-        self._log("installer started via ShellExecute rc=%s args=%s" % (rc, params))
-        return rc > 32                                            # <= 32 means the user refused the permission or it failed
+    def _run_copy(self, path):
+        """Copy the verified installer to a private TEMP folder and start it from there. The old version's uninstaller may
+        clean the folder the file was downloaded to (that killed the running installer = 'update failed')."""
+        import shutil, tempfile
+        folder = os.path.join(tempfile.gettempdir(), "SPS_Update")
+        os.makedirs(folder, exist_ok=True)
+        for n in os.listdir(folder):                              # leftovers of earlier tries
+            try:
+                os.remove(os.path.join(folder, n))
+            except OSError:
+                pass
+        dst = os.path.join(folder, os.path.basename(path))
+        shutil.copyfile(path, dst)
+        if not hmac.compare_digest(sha256_file_cached(dst), sha256_file_cached(path)):
+            raise OSError("the copy of the installer is damaged")
+        return dst
 
-    def open_installer_normally(self, info):
-        """Fallback: the normal installer wizard (visible, with its own buttons). Used when the silent start does not work."""
+    def _shell_run(self, exe, params, folder, verb="runas"):
+        import ctypes
+        rc = ctypes.windll.shell32.ShellExecuteW(None, verb, exe, params, folder, 1)    # 1 = normal window
+        self._log("ShellExecute verb=%s rc=%s exe=%s args=%s" % (verb, rc, exe, params))
+        return int(rc)
+
+    @staticmethod
+    def _rc_text(rc):
+        return {2: "file not found", 3: "folder not found", 5: "access denied", 31: "no program is associated",
+                193: "the installer is not a valid Windows program (damaged download?)", 1223: "administrator permission was refused"}.get(rc, "Windows error %s" % rc)
+
+    def prepare_installer(self, info):
+        """The slow part (re-check the 100+ MB file, copy it to TEMP). Safe to run in a worker thread.
+        Returns the path to run, or None (self.last_error says why)."""
+        self.last_error = ""
         path = self._verified_path(info)
         if not path:
+            self.last_error = "the downloaded file no longer matches its fingerprint/signature - check for updates again"
+            return None
+        try:
+            return self._run_copy(path)
+        except Exception as e:
+            self._log("copy to TEMP failed (%s) - starting from the download folder" % e)
+            return path
+
+    def launch_installer(self, info, run=None):
+        """Start the verified installer (Windows asks for administrator permission once). True on success.
+        self.last_error holds a plain-language reason when it fails. 'run' = result of prepare_installer (skips the slow part)."""
+        run = run or self.prepare_installer(info)
+        if not run:
             return False
-        import ctypes
-        rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", path, None, os.path.dirname(path), 1)
-        self._log("installer wizard started rc=%s" % rc)
-        return rc > 32
+        self.last_error = ""
+        folder = os.path.dirname(run)
+        params = " ".join(SILENT_ARGS + ['/LOG="%s"' % os.path.join(folder, "update_install.log")])
+        rc = self._shell_run(run, params, folder)
+        if rc > 32:
+            return True
+        self.last_error = self._rc_text(rc)
+        return False
+
+    def open_installer_normally(self, info, run=None):
+        """Fallback: the normal installer wizard (visible, with its own buttons)."""
+        run = run or self.prepare_installer(info)
+        if not run:
+            return False
+        self.last_error = ""
+        rc = self._shell_run(run, None, os.path.dirname(run))
+        if rc <= 32 and rc != 1223:
+            rc = self._shell_run(run, None, os.path.dirname(run), verb="open")        # without the admin prompt
+        if rc > 32:
+            return True
+        self.last_error = self._rc_text(rc)
+        return False

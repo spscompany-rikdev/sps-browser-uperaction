@@ -1748,6 +1748,9 @@ def sps_safe_search_redirect(url):
     except Exception:
         return None
 
+_YT_FAST_HOSTS = ("googlevideo.com", "ytimg.com", "ggpht.com", "youtube.com", "youtube-nocookie.com", "gstatic.com", "googleusercontent.com")
+
+
 def _sps_is_youtube_host(h):
     return h == "youtube.com" or h.endswith(".youtube.com") or h == "youtube-nocookie.com" or h.endswith(".youtube-nocookie.com") \
         or h in ("youtubei.googleapis.com", "youtube.googleapis.com")
@@ -2180,6 +2183,25 @@ class PrivacyInterceptor(QWebEngineUrlRequestInterceptor):
         url     = qurl.toString()
         url_low = url.lower()
         host    = (qurl.host() or "").lower()
+        # ── FAST PATH (YouTube start-up speed) ────────────────────────────────────────────────────────
+        # Every request used to walk through thousands of Python list checks and have its caching headers stripped
+        # (If-None-Match / Referer rewriting counted YouTube's own CDN as "third party"). On a video page that is
+        # dozens of requests before the first frame = the few extra seconds before a video starts. For YouTube's own
+        # media / image / static hosts only the ad-endpoint rule is applied; everything else passes untouched.
+        if (host.endswith(_YT_FAST_HOSTS) and not self.s.get("safe_player_on") and not self.s.get("lockdown_mode")
+                and not self.s.get("emergency_block_domains", "")):
+            try:
+                if info.resourceType() != QWebEngineUrlRequestInfo.ResourceType.ResourceTypeMainFrame:
+                    _p = qurl.path()
+                    if (self.s.get("ad_blocker") and self.s.get("youtube_ad_skip", True)
+                            and _sps_is_youtube_host(host)
+                            and (_p.startswith(("/api/stats/ads", "/pagead/", "/ptracking", "/get_midroll_info"))
+                                 or (_p.startswith("/api/stats/atr") and "adformat" in url.lower()))):
+                        self.blocked_trackers += 1; self.total_blocked += 1
+                        info.block(True)
+                    return
+            except Exception:
+                pass
         try:
             is_main = (info.resourceType() ==
                        QWebEngineUrlRequestInfo.ResourceType.ResourceTypeMainFrame)
@@ -2565,6 +2587,18 @@ class WebPage(QWebEnginePage):
         mw  = self.main_window
         s   = getattr(mw, "settings_data", {})
         url_str = url.toString().lower()
+        # V40: Google sign-in cannot work in an embedded browser -> a friendly choice instead of Google's "not secure" page
+        if isMainFrame and url.scheme() in ("http", "https") and s.get("google_signin_dialog", True):
+            try:
+                import sps_signin
+                if sps_signin.is_google_signin(url_str):
+                    if self.property("_sps_allow_signin") == url.toString():
+                        self.setProperty("_sps_allow_signin", "")       # the user chose "try here anyway" (once)
+                    else:
+                        QTimer.singleShot(0, lambda u=QUrl(url), p=self: mw._v40_google_signin_notice(u, p))
+                        return False
+            except Exception:
+                pass
         # V35: local .mp4/.mov/.mkv ... -> built-in player (the web engine has no H.264 decoder)
         if (url.scheme() == "file" and isMainFrame and not self._is_incognito()
                 and os.path.splitext(url.toLocalFile())[1].lower() in SPS_NATIVE_VIDEO_EXTS
@@ -14173,11 +14207,34 @@ def _sps_keep_window(w):
     """A top-level window that nothing refers to is garbage-collected by Python and VANISHES (the 'new window sometimes
     does not appear' bug). Every extra window created in code is registered here."""
     try:
+        dead = [x for x in _SPS_WINDOW_REFS if x is None or not _sps_alive(x)]
         _SPS_WINDOW_REFS[:] = [x for x in _SPS_WINDOW_REFS if x is not None and _sps_alive(x)]
+        for x in dead:
+            _sps_teardown_guest(x)
     except Exception:
         pass
     _SPS_WINDOW_REFS.append(w)
     return w
+
+def _sps_teardown_guest(w):
+    """A closed GUEST window owns an unnamed web-engine profile. Qt aborts the whole program when a profile is destroyed while
+    a page of it still exists, so the pages are deleted first (deleting the window directly would delete the profile first)."""
+    try:
+        if w is None or not getattr(w, "_is_guest", False):
+            return
+        from PyQt6 import sip
+        for i in reversed(range(w.tabs.count())):
+            b = w.tabs.widget(i)
+            w.tabs.removeTab(i)
+            if b is not None:
+                sip.delete(b)
+    except Exception:
+        pass
+
+# V40: set to [True] right before a Guest window is built; MainWindow.__init__ reads and clears it.
+# A guest must never open the saved profile (a 2nd persistent web-engine profile on the same folder makes pages blank/hang),
+# never restore the user's tabs, never start its own updater / tray icon / tour.
+_SPS_GUEST_NEXT = [False]
 
 def _sps_alive(w):
     try:
@@ -14193,21 +14250,36 @@ class MainWindow(V32Mixin, QMainWindow):
         CURRENT_PROFILE_NAME = profile_name
         self.profile_name    = profile_name
         self.settings_data   = load_settings(profile_name)
-        self.profile_path    = get_profile_path(profile_name)
-        sps_profile_lock(profile_name)                       # "this profile is open" (the picker shows it + never opens it twice)
-        try:
-            import atexit; atexit.register(sps_profile_unlock, profile_name)
-        except Exception:
-            pass
+        self._is_guest       = bool(_SPS_GUEST_NEXT[0]); _SPS_GUEST_NEXT[0] = False
+        if self._is_guest:                                   # V40: guest = fresh, private, nothing restored
+            import tempfile as _gtf, shutil as _gsh, atexit as _gat
+            self.settings_data = dict(self.settings_data)
+            for _k in ("restore_tabs", "restore_last_workspace", "background_mode", "session_auto_save"):
+                self.settings_data[_k] = False
+            self.profile_path = _gtf.mkdtemp(prefix="sps_guest_")
+            _gat.register(_gsh.rmtree, self.profile_path, True)
+        else:
+            self.profile_path    = get_profile_path(profile_name)
+            sps_profile_lock(profile_name)                   # "this profile is open" (the picker shows it + never opens it twice)
+            try:
+                import atexit; atexit.register(sps_profile_unlock, profile_name)
+            except Exception:
+                pass
         self._closed_tabs    = []
         self._reading_mode   = False
         self._focus_mode     = False
 
         # Web engine profiles
-        self.browser_profile = QWebEngineProfile(profile_name, self)
-        self.browser_profile.setPersistentStoragePath(os.path.join(self.profile_path,"storage"))
-        self.browser_profile.setPersistentCookiesPolicy(
-            QWebEngineProfile.PersistentCookiesPolicy.AllowPersistentCookies)
+        if self._is_guest:
+            self.browser_profile = QWebEngineProfile(self)   # unnamed = off-the-record, nothing on disk
+            self.browser_profile.setPersistentCookiesPolicy(
+                QWebEngineProfile.PersistentCookiesPolicy.NoPersistentCookies)
+            self.browser_profile.setHttpCacheType(QWebEngineProfile.HttpCacheType.MemoryHttpCache)
+        else:
+            self.browser_profile = QWebEngineProfile(profile_name, self)
+            self.browser_profile.setPersistentStoragePath(os.path.join(self.profile_path,"storage"))
+            self.browser_profile.setPersistentCookiesPolicy(
+                QWebEngineProfile.PersistentCookiesPolicy.AllowPersistentCookies)
         # Unnamed profile = truly off-the-record; Qt never persists it
         self.incognito_profile = QWebEngineProfile(self)
         self.incognito_profile.setPersistentCookiesPolicy(
@@ -14317,7 +14389,8 @@ class MainWindow(V32Mixin, QMainWindow):
         if self.settings_data.get("restore_last_workspace") and not RESTART_INFO["restarted"]:
             QTimer.singleShot(1200, lambda: self.load_workspace("Last Session"))
         self._v32_init()                                       # health monitor, restart engine, password script
-        QTimer.singleShot(2200, self._start_tour_if_needed)   # first-run guided tour
+        if not self._is_guest:
+            QTimer.singleShot(2200, self._start_tour_if_needed)   # first-run guided tour
 
     def _load_reading_list(self):
         path=os.path.join(self.profile_path,"reading_list.json")
@@ -14759,8 +14832,9 @@ class MainWindow(V32Mixin, QMainWindow):
         self._zoom_status=QLabel("100%"); self.status.addPermanentWidget(self._zoom_status)
         QTimer.singleShot(2000,self._update_blocked_count)
 
-        # System tray
-        self._setup_tray()
+        # System tray (a guest window gets none: a second tray icon confuses the first one)
+        if not self._is_guest:
+            self._setup_tray()
 
         self.add_new_tab(label="New Tab")
 

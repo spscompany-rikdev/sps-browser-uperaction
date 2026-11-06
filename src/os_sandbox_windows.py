@@ -71,7 +71,13 @@ class WindowsJobObject:
             raise OSError("Failed to create Job Object")
         self._configure()
 
-    def _configure(self):
+    def disarm(self):
+        """Switch kill-on-close OFF. Used when the browser starts its own installer for an update: Windows puts a program
+        started by the browser (even an elevated one) into this job, so when the sandbox closed the installer was killed
+        with it - 'the browser closes but no installer opens'."""
+        self._configure(kill_on_close=False)
+
+    def _configure(self, kill_on_close=True):
         if not IS_WINDOWS or not self._handle:
             return
 
@@ -104,7 +110,7 @@ class WindowsJobObject:
             ]
 
         ext = EXTENDED()
-        ext.BasicLimitInformation.LimitFlags = self.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE      # NO process-count limit
+        ext.BasicLimitInformation.LimitFlags = self.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE if kill_on_close else 0   # NO process-count limit
         kernel32.SetInformationJobObject(self._handle, self.JobObjectExtendedLimitInformation,
                                          ctypes.byref(ext), ctypes.sizeof(ext))
 

@@ -97,6 +97,30 @@ def _theme(mw):
     return t
 
 
+def give_gesture(view, then=None):
+    """Fullscreen and picture-in-picture only work after a REAL user input in the page. A click on our own panel is not one, so the
+    page gets focus and a harmless key press (F13, which no site uses); `then` runs ~250 ms later, while the page's "user
+    activation" is still valid (verified: navigator.userActivation.isActive becomes true)."""
+    try:
+        if not view.hasFocus():
+            view.setFocus()
+    except Exception:
+        pass
+
+    def send():
+        try:
+            from PyQt6.QtCore import QEvent
+            from PyQt6.QtGui import QKeyEvent
+            tgt = view.focusProxy() or view
+            for et in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
+                QApplication.sendEvent(tgt, QKeyEvent(et, Qt.Key.Key_F13, Qt.KeyboardModifier.NoModifier))
+        except Exception:
+            pass
+    QTimer.singleShot(150, send)
+    if then is not None:
+        QTimer.singleShot(380, then)
+
+
 class Controller(QObject):
     """Polls the page that matters (a tab that is making sound, otherwise the current tab) and keeps the toolbar button in sync."""
     def __init__(self, mw, btn):
@@ -165,11 +189,14 @@ class Controller(QObject):
         self.btn.setToolTip({"media": "Easy access - media controls", "image": "Easy access - photo tools"}.get(self.kind, "Easy access - page tools"))
         self.btn.update()
 
-    def run(self, js, tab=None):
+    def run(self, js, tab=None, gesture=False):
         w = tab or self.tab or self.mw.tabs.currentWidget()
         if w is not None:
             try:
-                w.page().runJavaScript(js)
+                if gesture:
+                    give_gesture(w, lambda: w.page().runJavaScript(js))
+                else:
+                    w.page().runJavaScript(js)
             except Exception:
                 pass
 
@@ -192,7 +219,16 @@ class EasyPanel(QFrame):
             "QPushButton#big:hover{background:%(acc)s;}"
             "QSlider::groove:horizontal{height:5px;background:%(hover)s;border-radius:2px;} QSlider::sub-page:horizontal{background:%(acc)s;border-radius:2px;}"
             "QSlider::handle:horizontal{background:%(acc)s;width:14px;height:14px;margin:-5px 0;border-radius:7px;}" % t)
-        self.lay = QVBoxLayout(self.box); self.lay.setContentsMargins(14, 12, 14, 12); self.lay.setSpacing(8)
+        from PyQt6.QtWidgets import QScrollArea
+        bl = QVBoxLayout(self.box); bl.setContentsMargins(0, 6, 0, 6)
+        self.scroll = QScrollArea(); self.scroll.setWidgetResizable(True); self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll.setStyleSheet("QScrollArea{background:transparent;border:none;}QScrollBar:vertical{width:8px;background:transparent;margin:2px;}"
+                                  "QScrollBar::handle:vertical{background:rgba(128,128,128,110);border-radius:4px;min-height:30px;}"
+                                  "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}")
+        self.body = QWidget(); self.body.setStyleSheet("background:transparent;")
+        self.scroll.setWidget(self.body); bl.addWidget(self.scroll)
+        self.lay = QVBoxLayout(self.body); self.lay.setContentsMargins(14, 6, 14, 6); self.lay.setSpacing(8)
         self.setFixedWidth(380)
         self._built = None
         self.rebuild()
@@ -244,6 +280,20 @@ class EasyPanel(QFrame):
         kind, info = self.ctl.kind, self.ctl.info
         self._built = kind
         {"media": self._media, "image": self._image}.get(kind, self._page)(info)
+        self.fit()
+
+    def fit(self):
+        """Height = content, but never taller than the screen; the top edge never moves (the content scrolls instead)."""
+        try:
+            scr = QApplication.primaryScreen().availableGeometry()
+            want = self.body.sizeHint().height() + 12 + 32
+            h = max(160, min(want, scr.height() - 90))
+            top = self.y() if self.isVisible() else None
+            self.setFixedHeight(h)
+            if top is not None:
+                self.move(self.x(), min(top, scr.bottom() - h - 8))
+        except Exception:
+            pass
 
     def _sync(self):
         if self.ctl.kind != self._built:
@@ -283,18 +333,31 @@ class EasyPanel(QFrame):
         sp = QHBoxLayout(); sp.setSpacing(5)
         for rate in (0.5, 0.75, 1.0, 1.25, 1.5, 2.0):
             b = QPushButton(("%g×" % rate)); b.setProperty("on", abs((m.get("rate") or 1) - rate) < 0.01); b.setCursor(Qt.CursorShape.PointingHandCursor)
-            b.clicked.connect(lambda *_, r_=rate: (self.ctl.run(media_js("rate", r_)), QTimer.singleShot(300, self.rebuild_soon))); sp.addWidget(b)
+            b.clicked.connect(lambda *_, r_=rate, b_=b: self._set_rate(r_, b_)); sp.addWidget(b)
         self.lay.addLayout(sp)
+        self.speed_btns = []
+        for i in range(sp.count()):
+            self.speed_btns.append(sp.itemAt(i).widget())
         self.loop_b = QPushButton("  Loop"); self.loop_b.setIcon(sps_icons.icon("repeat", self.t["text_primary"], 18)); self.loop_b.setProperty("on", bool(m.get("loop")))
-        self.loop_b.clicked.connect(lambda *_: self.ctl.run(media_js("loop")))
-        pip = QPushButton("  PiP"); pip.setIcon(sps_icons.icon("pip", self.t["text_primary"], 18)); pip.clicked.connect(lambda *_: self.ctl.run(media_js("pip")))
-        fs = QPushButton("  Fullscreen"); fs.setIcon(sps_icons.icon("fullscreen", self.t["text_primary"], 18)); fs.clicked.connect(lambda *_: (self.close(), self.ctl.run(media_js("fs"))))
+        self.loop_b.clicked.connect(lambda *_: self._toggle_loop())
+        pip = QPushButton("  PiP"); pip.setIcon(sps_icons.icon("pip", self.t["text_primary"], 18)); pip.clicked.connect(lambda *_: (self.close(), self.ctl.run(media_js("pip"), gesture=True)))
+        fs = QPushButton("  Fullscreen"); fs.setIcon(sps_icons.icon("fullscreen", self.t["text_primary"], 18)); fs.clicked.connect(lambda *_: (self.close(), self.ctl.run(media_js("fs"), gesture=True)))
         g = QHBoxLayout(); [g.addWidget(x) for x in (self.loop_b, pip, fs)]; self.lay.addLayout(g)
         cur = self.mw.tabs.currentWidget()
         if self.ctl.tab is not None and self.ctl.tab is not cur:
             go = QPushButton("  Go to this tab"); go.setIcon(sps_icons.icon("open", self.t["text_primary"], 18))
             go.clicked.connect(lambda *_: (self.close(), self.mw.tabs.setCurrentWidget(self.ctl.tab))); self.lay.addWidget(go)
         self._sync()
+
+    def _set_rate(self, rate, btn):
+        self.ctl.run(media_js("rate", rate))
+        for x in getattr(self, "speed_btns", []):
+            x.setProperty("on", x is btn); x.style().unpolish(x); x.style().polish(x)
+
+    def _toggle_loop(self):
+        self.ctl.run(media_js("loop"))
+        on = not bool(self.loop_b.property("on")); self.loop_b.setProperty("on", on)
+        self.loop_b.style().unpolish(self.loop_b); self.loop_b.style().polish(self.loop_b)
 
     def rebuild_soon(self):
         self.ctl.probe(lambda: self.rebuild() if self.isVisible() else None)
@@ -332,7 +395,7 @@ class EasyPanel(QFrame):
             b.clicked.connect(lambda *_: (self.close(), self.ctl.run(GALLERY_JS))); self.lay.addWidget(b)
 
     def popup_at(self, anchor):
-        self.adjustSize()
+        self.fit()
         pos = anchor.mapToGlobal(QPoint(anchor.width() - self.width() + 14, anchor.height() + 2))
         scr = QApplication.primaryScreen().availableGeometry() if QApplication.primaryScreen() else None
         if scr is not None:

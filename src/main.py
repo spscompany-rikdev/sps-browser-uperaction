@@ -27,8 +27,27 @@ def _fatal(msg):
         pass
 
 
+def _drop_admin_rights():
+    """A browser running as administrator breaks (Chromium refuses its sandbox). If this exe was started elevated
+    (e.g. 'Run as administrator', or by an installer) and no arguments were given, start it again at normal level
+    through explorer.exe - Explorer always starts programs without elevation - and quit."""
+    try:
+        if sys.platform != "win32" or len(sys.argv) > 1 or os.environ.get("SPS_KEEP_ELEVATED") == "1":
+            return False
+        import ctypes
+        if not ctypes.windll.shell32.IsUserAnAdmin():
+            return False
+        import subprocess
+        subprocess.Popen(["explorer.exe", sys.executable], close_fds=True)
+        return True
+    except Exception:
+        return False
+
+
 if __name__ == "__main__":
     multiprocessing.freeze_support()
+    if getattr(sys, "frozen", False) and _drop_admin_rights():
+        sys.exit(0)
     try:
         if getattr(sys, "frozen", False):
             base = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))

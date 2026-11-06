@@ -1033,7 +1033,24 @@ class SandboxController(QObject):
             except Exception: pass
             self.watcher.stop()
 
+    def _release_job_for_update(self):
+        """The browser is about to start the update installer and left a note. The installer ends up INSIDE our Job Object, and
+        closing the job (when the sandbox quits) would kill it - so the job stops being 'kill on close' first."""
+        note = self.restart_file + ".update"
+        try:
+            if not os.path.exists(note):
+                return
+            with open(note, encoding="utf-8") as f:
+                data = json.load(f)
+            os.remove(note)
+            if time.time() - float(data.get("time", 0)) < 300 and getattr(self, "_job", None):
+                self._job.disarm()
+                print("[Sandbox] Update installer starting - Job Object no longer kills its processes on close")
+        except Exception as e:
+            print(f"[Sandbox] update note: {e}")
+
     def _poll_process(self):
+        self._release_job_for_update()
         if getattr(self, "_showing_crash", False):
             return                                   # the crash message is on screen - do not quit under it
         if self.proc and self.proc.poll() is not None:
@@ -1081,6 +1098,7 @@ class SandboxController(QObject):
         if self._dead_handled:
             return
         self._dead_handled = True
+        self._release_job_for_update()
         self._stop_monitors()
         try:                                        # the watcher only knows "it is gone"; Popen knows the real exit code
             real = self.proc.poll() if self.proc else None

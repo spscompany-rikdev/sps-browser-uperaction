@@ -96,20 +96,32 @@ Source: "{#VCREDIST}"; DestDir: "{tmp}"; Flags: deleteafterinstall; Check: VCRed
 #endif
 
 [Icons]
-Name: "{group}\{#APP_NAME}"; Filename: "{app}\{#APP_EXE}"; WorkingDir: "{app}"
+Name: "{group}\{#APP_NAME}"; Filename: "{app}\{#APP_EXE}"; WorkingDir: "{app}"; IconFilename: "{app}\{#APP_EXE}"
 Name: "{group}\License"; Filename: "{app}\LICENSE.txt"
 Name: "{group}\Uninstall {#APP_NAME}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\{#APP_NAME}"; Filename: "{app}\{#APP_EXE}"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{autodesktop}\{#APP_NAME}"; Filename: "{app}\{#APP_EXE}"; WorkingDir: "{app}"; IconFilename: "{app}\{#APP_EXE}"; Tasks: desktopicon
 
 [Run]
 ; 1) Visual C++ runtime: completely silent, no window, no restart. Skipped when already installed.
 #ifexist SourcePath + VCREDIST
 Filename: "{tmp}\vc_redist.x64.exe"; Parameters: "/install /quiet /norestart"; StatusMsg: "Installing Microsoft Visual C++ runtime..."; Flags: waituntilterminated runhidden; Check: VCRedistNeeded
 #endif
-; 2) normal setup: offer to launch SPS Browser (always through the sandbox exe)
-Filename: "{app}\{#APP_EXE}"; Description: "Launch {#APP_NAME} now"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent
+; 2) normal setup: offer to launch SPS Browser (always through the sandbox exe).
+;    runasoriginaluser is ESSENTIAL: setup runs as administrator, and a browser (Chromium/Qt WebEngine) started from an
+;    elevated process does not work - that was the "first install does not open, the second one does" problem.
+Filename: "{app}\{#APP_EXE}"; Description: "Launch {#APP_NAME} now"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent runasoriginaluser
 ; 3) update started by the browser itself (/RELAUNCH): start the new version again, as the normal (non-admin) user
 Filename: "{app}\{#APP_EXE}"; WorkingDir: "{app}"; Flags: nowait runasoriginaluser; Check: RelaunchRequested
+
+[InstallDelete]
+; Old SPS Browser shortcuts (from earlier versions / a different install folder) point to files that no longer exist - clicking
+; them does nothing, while the new shortcut sits next to them. They are removed right before the new ones are created below.
+Type: files; Name: "{userdesktop}\{#APP_NAME}.lnk"
+Type: files; Name: "{commondesktop}\{#APP_NAME}.lnk"
+Type: files; Name: "{userdesktop}\SPS_Browser.lnk"
+Type: files; Name: "{commondesktop}\SPS_Browser.lnk"
+Type: filesandordirs; Name: "{userprograms}\{#APP_NAME}"
+Type: filesandordirs; Name: "{commonprograms}\{#APP_NAME}"
 
 [Registry]
 Root: HKA; Subkey: "Software\{#APP_PUBLISHER}\{#APP_NAME}"; ValueType: string; ValueName: "InstallPath"; ValueData: "{app}"; Flags: uninsdeletekey

@@ -256,29 +256,52 @@ def _v36_updater(self):
 def _v36_start_updater(self):
     """Called once when the window opens: silent background checks for the whole session."""
     try:
-        if os.environ.get("SPS_DISABLE_UPDATER") == "1":
-            return
+        if os.environ.get("SPS_DISABLE_UPDATER") == "1" or getattr(self, "_is_guest", False):
+            return                      # a guest window never runs its own updater / update window
         self._v36_updater().start_background()
         QTimer.singleShot(8000, self._v36_check_staged_update)
     except Exception as e:
         print("[SPS V36] updater not started:", e)
 
 def _v36_check_staged_update(self, manual=False):
-    """If a verified update is waiting on disk, show the window. Returns True if one was shown."""
-    try:
-        info = self._v36_updater().staged_update()
-    except Exception:
-        info = None
-    if not info:
+    """If a verified update is waiting on disk, show the window.
+    The check re-hashes the installer (100+ MB) - that runs in a worker thread, NEVER in the window thread, otherwise the whole
+    browser froze for several seconds right after start-up. Returns True when a check was started."""
+    import threading
+    if getattr(self, "_is_guest", False) or getattr(self, "_v36_staged_check_running", False):
         return False
-    if getattr(self, "_v36_update_dialog_open", False):
-        return True
-    self._v36_update_dialog_open = True
-    try:
-        dlg = SpsForcedUpdateDialog(self, info)
-        dlg.exec()
-    finally:
-        self._v36_update_dialog_open = False
+    self._v36_staged_check_running = True
+    box = {}
+    def work():
+        try:
+            box["info"] = self._v36_updater().staged_update()
+        except Exception:
+            box["info"] = None
+        box["done"] = True
+    threading.Thread(target=work, name="sps-staged-check", daemon=True).start()
+    timer = QTimer(self); timer.setInterval(250)
+    def poll():
+        if not box.get("done"):
+            return
+        timer.stop(); timer.deleteLater()
+        self._v36_staged_check_running = False
+        info = box.get("info")
+        if not info or getattr(self, "_v36_update_dialog_open", False):
+            return
+        app = QApplication.instance()
+        if app is not None and (app.activeModalWidget() is not None or app.property("_sps_update_dialog_up")):
+            QTimer.singleShot(15000, self._v36_check_staged_update)       # another window is busy - ask again in a moment
+            return
+        self._v36_update_dialog_open = True
+        if app is not None: app.setProperty("_sps_update_dialog_up", True)
+        try:
+            dlg = SpsForcedUpdateDialog(self, info)
+            QTimer.singleShot(0, lambda: (dlg.raise_(), dlg.activateWindow()))    # never hidden behind the browser window
+            dlg.exec()
+        finally:
+            self._v36_update_dialog_open = False
+            if app is not None: app.setProperty("_sps_update_dialog_up", False)
+    timer.timeout.connect(poll); timer.start()
     return True
 
 class SpsForcedUpdateDialog(QDialog):
@@ -289,7 +312,8 @@ class SpsForcedUpdateDialog(QDialog):
         self.mandatory = bool(info.get("mandatory", True))
         self.setWindowTitle("SPS Browser update")
         self.setModal(True)
-        flags = Qt.WindowType.Dialog | Qt.WindowType.WindowTitleHint | Qt.WindowType.CustomizeWindowHint
+        flags = (Qt.WindowType.Dialog | Qt.WindowType.WindowTitleHint | Qt.WindowType.CustomizeWindowHint
+                 | Qt.WindowType.WindowStaysOnTopHint)
         if not self.mandatory:
             flags |= Qt.WindowType.WindowCloseButtonHint
         self.setWindowFlags(flags)
@@ -328,16 +352,85 @@ class SpsForcedUpdateDialog(QDialog):
         else:
             super().closeEvent(ev)
 
+    def _bg(self, fn, done):
+        """Run fn() in a worker thread (it hashes/copies the big installer) and call done(result) in the window thread."""
+        import threading
+        box = {}
+        def work():
+            try:
+                box["r"] = fn()
+            except Exception as e:
+                box["r"] = False; print("[SPS V36] installer step failed:", e)
+            box["done"] = True
+        threading.Thread(target=work, name="sps-installer-start", daemon=True).start()
+        t = QTimer(self); t.setInterval(150)
+        def poll():
+            if box.get("done"):
+                t.stop(); t.deleteLater(); done(box.get("r"))
+        t.timeout.connect(poll); t.start()
+
     def _manual(self):
         """Shows the normal installer wizard (always works, even if the silent update does not)."""
+        self.btn.setEnabled(False); self.manual.setEnabled(False)
+        self.status.setText("Preparing the installer... (checking the file, a few seconds)")
+        self._bg(self._prepare_and_announce,
+                 lambda run: self._manual_done(self.win._v36_updater().open_installer_normally(self.info, run) if run else False))
+
+    def _prepare_and_announce(self):
+        run = self.win._v36_updater().prepare_installer(self.info)     # slow part, in the worker thread
+        if run:
+            self._announce_launch()
+        return run
+
+    def _announce_launch(self):
+        """Tell the sandbox (it owns the Job Object) that an installer is about to start, so it does not kill it at exit."""
         try:
-            ok = self.win._v36_updater().open_installer_normally(self.info)
+            note = os.environ.get("SPS_SANDBOX_RESTART_FILE")
+            if note:
+                with open(note + ".update", "w", encoding="utf-8") as f:
+                    json.dump({"time": time.time(), "pid": os.getpid()}, f)
+                time.sleep(1.3)         # the sandbox looks once a second; it must see the note BEFORE the installer starts
         except Exception as e:
-            ok = False; print("[SPS V36] manual installer failed:", e)
+            print("[SPS V40] update note failed:", e)
+
+    def _wait_for_installer(self, then_exit_text):
+        """Close the browser only when the installer process is really running; otherwise stay open and say so."""
+        name = os.path.basename(self.info.get("path") or "").lower()
+        t0 = time.time()
+        t = QTimer(self); t.setInterval(500)
+        def running():
+            try:
+                import psutil
+                return any((p.info.get("name") or "").lower() == name for p in psutil.process_iter(["name"]))
+            except Exception:
+                return None
+        def tick():
+            r = running()
+            if r is None or r:                      # running (or cannot be checked) -> go
+                t.stop()
+                self.status.setText(then_exit_text)
+                QApplication.processEvents()
+                self.win._v36_updater()._log("installer process is running - closing SPS Browser now")
+                QTimer.singleShot(1500, lambda: os._exit(0))
+            elif time.time() - t0 > 25:
+                t.stop()
+                self.btn.setEnabled(True); self.manual.setEnabled(True)
+                self.win._v36_updater()._log("installer process did NOT appear within 25 s - browser stays open")
+                self.status.setText("The installer did not start (or was closed). The browser stays open.\n"
+                                    "Try \"Open installer (manual)\", or run the file shown in the folder yourself.")
+                try:
+                    import subprocess
+                    p = self.info.get("path") or ""
+                    if p and os.path.isfile(p): subprocess.Popen(["explorer", "/select,", p])
+                except Exception:
+                    pass
+        t.timeout.connect(tick); t.start()
+
+    def _manual_done(self, ok):
+        self.btn.setEnabled(True); self.manual.setEnabled(True)
         if ok:
-            self.status.setText("The installer window is open. Follow it; SPS Browser closes now so the files can be replaced.")
-            QApplication.processEvents()
-            QTimer.singleShot(2500, lambda: os._exit(0))
+            self.btn.setEnabled(False); self.manual.setEnabled(False)
+            self._wait_for_installer("The installer window is open. Follow it; SPS Browser closes now so the files can be replaced.")
         else:
             try:
                 p = self.info.get("path") or ""
@@ -346,24 +439,24 @@ class SpsForcedUpdateDialog(QDialog):
                     subprocess.Popen(["explorer", "/select,", p])
             except Exception:
                 pass
-            self.status.setText("Could not start it. The installer file is shown in a folder - double-click it yourself.")
+            why = getattr(self.win._v36_updater(), "last_error", "") or ""
+            self.status.setText("Could not start it" + (" (%s)" % why if why else "") + ". The installer file is shown in a folder - double-click it yourself.")
 
     def _go(self):
-        self.btn.setEnabled(False)
-        self.status.setText("Starting the installer... (Windows may ask for permission once)")
-        QApplication.processEvents()
-        try:
-            ok = self.win._v36_updater().launch_installer(self.info)
-        except Exception as e:
-            ok = False; print("[SPS V36] launch failed:", e)
+        self.btn.setEnabled(False); self.manual.setEnabled(False)
+        self.status.setText("Starting the installer... (checking the file, then Windows may ask for permission once)")
+        self._bg(self._prepare_and_announce,
+                 lambda run: self._go_done(self.win._v36_updater().launch_installer(self.info, run) if run else False))
+
+    def _go_done(self, ok):
+        self.manual.setEnabled(True)
         if ok:
-            self.status.setText("Installing... a small progress window appears. SPS Browser closes and opens again by itself.")
-            QApplication.processEvents()
-            # leave quickly so the installer can replace the files
-            QTimer.singleShot(2500, lambda: os._exit(0))
+            self.manual.setEnabled(False)
+            self._wait_for_installer("Installing... a small progress window appears. SPS Browser closes and opens again by itself.")
         else:
             self.btn.setEnabled(True)
-            self.status.setText("The silent update could not start (permission refused or the file changed). Try again, or use \"Open installer (manual)\".")
+            why = getattr(self.win._v36_updater(), "last_error", "") or "permission refused or the file changed"
+            self.status.setText("The update could not start: %s.\nTry again, or use \"Open installer (manual)\"." % why)
 
 class SpsUpdateCheckDialog(QDialog):
     """Manual 'Check for Updates'. Always closeable (X, Esc or Cancel), never blocks the browser, shows what is happening,
@@ -506,6 +599,39 @@ def _v36_open_in_system_browser(self):
         QMessageBox.warning(self, "Open in the system browser", f"Could not open it: {e}")
 
 MainWindow._v36_open_in_system_browser = _v36_open_in_system_browser
+
+
+# ── V40: Google sign-in notice (the page is caught before it loads; see sps_signin.py) ──
+def _v40_google_signin_notice(self, url, page):
+    if getattr(self, "_v40_signin_dialog_open", False):
+        return
+    self._v40_signin_dialog_open = True
+    try:
+        import sps_signin
+        choice = sps_signin.show_signin_dialog(self, url.toString(), getattr(self, "_theme", None))
+    except Exception as e:
+        print("[SPS V40] sign-in dialog failed:", e); choice = "skip"
+    finally:
+        self._v40_signin_dialog_open = False
+    try:
+        if choice == "open":
+            from PyQt6.QtGui import QDesktopServices
+            QDesktopServices.openUrl(url)
+        elif choice == "try":
+            page.setProperty("_sps_allow_signin", url.toString()); page.load(url)
+    except Exception as e:
+        print("[SPS V40] sign-in choice failed:", e)
+    if choice in ("open", "skip"):                       # an empty pop-up tab that only wanted to sign in is not left behind
+        try:
+            cur = page.url().toString()
+            if (not cur) or cur == "about:blank" or "sps_newtab_" in cur:
+                b = next((self.tabs.widget(i) for i in range(self.tabs.count()) if self.tabs.widget(i).page() is page), None)
+                if b is not None and self.tabs.count() > 1:
+                    self._close_tab(self.tabs.indexOf(b))
+        except Exception:
+            pass
+
+MainWindow._v40_google_signin_notice = _v40_google_signin_notice
 
 
 # ── V38: Chrome-style print window (preview, paper, margins, scale, headers, "selected area" ...) ──

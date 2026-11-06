@@ -234,19 +234,22 @@ def _open_guest_mode(self):
         "Open a Guest window?\n\nAll browsing in Guest mode is private — no history, cookies, or passwords are saved when the window closes.",
         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
     if reply != QMessageBox.StandardButton.Yes: return
-    import tempfile, shutil, atexit
-    guest_win = MainWindow.__new__(MainWindow)
-    MainWindow.__init__(guest_win, self.profile_name)
-    _sps_keep_window(guest_win)                       # without a reference Python deletes the window and it vanishes
-    guest_win._is_guest = True                        # no history is written (see _save_history)
+    # V40: the guest window is built OFF the record from the very start (see _SPS_GUEST_NEXT in SPS_BROWSER.py): own temp folder,
+    # no saved profile, no restored tabs, no updater/tray/tour. Before, it opened a 2nd copy of the saved profile first, which
+    # could leave the guest window blank or frozen.
+    _SPS_GUEST_NEXT[0] = True                         # patch code runs inside SPS_BROWSER's namespace
     try:
-        tmp = tempfile.mkdtemp(prefix="sps_guest_")   # empty bookmarks / history for the guest window, removed afterwards
-        guest_win.profile_path = tmp
-        atexit.register(shutil.rmtree, tmp, True)
-        guest_win.browser_profile = guest_win.incognito_profile          # cookies / cache live only in memory
-        for i in reversed(range(guest_win.tabs.count())):
-            guest_win._close_tab(i)
+        guest_win = MainWindow(self.profile_name)
+    finally:
+        _SPS_GUEST_NEXT[0] = False
+    _sps_keep_window(guest_win)                       # without a reference Python deletes the window and it vanishes
+    try:
+        extra = [guest_win.tabs.widget(i) for i in range(guest_win.tabs.count())]
         guest_win.add_new_tab(None, "Guest")           # None = the real (private) New Tab page, not a blank tab
+        for t in extra:                                # remove the tab(s) MainWindow made on its own
+            guest_win.tabs.removeTab(guest_win.tabs.indexOf(t))
+            t.deleteLater()                            # brand-new empty tab: nothing to stop, just delete
+        guest_win.tabs.setCurrentIndex(0)
         guest_win._refresh_bookmarks_bar()
     except Exception as ex:
         print("[SPS guest]", ex)
