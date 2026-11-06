@@ -141,7 +141,7 @@ class NetworkMonitor(threading.Thread):
         pid: int,
         permission_callback: Callable[[str, int, str], bool],
         conn_log: Optional[ConnectionLog] = None,
-        poll_interval: float = 0.5,
+        poll_interval: float = 2.0,      # V40: was 0.5 - polling the socket table twice a second is needless load
     ):
         super().__init__(daemon=True)
         self.pid                 = pid

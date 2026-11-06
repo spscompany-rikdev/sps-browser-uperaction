@@ -12,6 +12,17 @@ BASE = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
 EXE_DIR = os.path.dirname(os.path.abspath(sys.executable)) if FROZEN else BASE
 
 
+def _trace(msg):
+    """V40: one line per start-up stage in %TEMP%\\SPS_startup_log.txt (flushed at once). If the PC ever freezes while SPS Browser
+    starts, the LAST line of this file after the restart shows how far it got."""
+    try:
+        import time as _t
+        with open(os.path.join(os.environ.get("TEMP", os.path.expanduser("~")), "SPS_startup_log.txt"), "a", encoding="utf-8") as f:
+            f.write("%s pid=%s %s\n" % (_t.strftime("%H:%M:%S"), os.getpid(), msg))
+    except Exception:
+        pass
+
+
 def _fatal(msg):
     try:
         log = os.path.join(os.environ.get("TEMP", os.path.expanduser("~")), "SPS_Browser_error.txt")
@@ -178,11 +189,13 @@ if __name__ == "__main__":
     try:
         if BASE not in sys.path:
             sys.path.insert(0, BASE)
+        _trace("core: start (argv=%s)" % sys.argv[1:])
         _setup_qt_paths()
         _enable_crash_log()
         if "--selftest" in sys.argv:
             _selftest()
         import sps_browser_app
+        _trace("core: browser code loaded")
         sps_browser_app.sps_main()
     except SystemExit:
         raise

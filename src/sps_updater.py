@@ -230,7 +230,8 @@ def sha256_file_cached(path):
         return hit
     digest = sha256_file(path)
     with _HASH_LOCK:
-        _HASH_CACHE.clear()                                   # only the newest installer matters
+        if len(_HASH_CACHE) >= 4:
+            _HASH_CACHE.clear()                               # a few recent files (download + its TEMP copy) are enough
         _HASH_CACHE[key] = digest
     return digest
 

@@ -884,7 +884,7 @@ class ProcessWatcher(QThread):
             except Exception:
                 pass
 
-            time.sleep(0.3)
+            time.sleep(1.0)
 
     def _is_sensitive_path(self, path: str) -> bool:
         return bool(_policy_classify(path, self.browser_dir))

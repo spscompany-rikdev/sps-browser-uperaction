@@ -126,7 +126,17 @@ from PyQt6.QtPrintSupport import QPrinter, QPrintDialog
 #  CONSTANTS & PATHS
 # ═══════════════════════════════════════════════════════════════
 APP_NAME         = "SPS Browser"
-VERSION          = "38.0.0"
+VERSION          = "40.0.0"
+
+
+def _trace(msg):
+    """V40: one line per start-up stage in %TEMP%\\SPS_startup_log.txt. After a freeze, the last line shows how far it got."""
+    try:
+        with open(os.path.join(os.environ.get("TEMP", os.path.expanduser("~")), "SPS_startup_log.txt"), "a", encoding="utf-8") as f:
+            f.write("%s pid=%s %s\n" % (time.strftime("%H:%M:%S"), os.getpid(), msg))
+    except Exception:
+        pass
+
 EXTENSION_STORE_URL ="https://spscompany-rikdev.github.io/SPS_BROWSER_EXTENTIONS"
 def _sps_pick_data_root():
     """Find a writable data folder on ANY computer.
@@ -19436,6 +19446,8 @@ def sps_main():
             QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseSoftwareOpenGL, True)
         except Exception:
             pass
+    try: _trace("browser: creating QApplication (graphics mode: %s)" % _gfx_mode)
+    except NameError: pass
     app=QApplication(sys.argv)
     try:
         app.aboutToQuit.connect(_sps_gfx_clear)          # clean exit = not a crash
@@ -19505,6 +19517,8 @@ def sps_main():
         sys.exit(1)
     _SPS_MAIN_WINDOW = window
     window.show()
+    try: _trace("browser: main window shown")
+    except NameError: pass
     if _SPS_GFX.get("notice"):
         QTimer.singleShot(1800, lambda: QMessageBox.information(window, "Safe graphics mode", _SPS_GFX["notice"]))
 

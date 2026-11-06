@@ -274,6 +274,15 @@ class WindowTests(unittest.TestCase):
         self.assertIn("sps_newtab_", g.tabs.currentWidget().url().toString())   # a real New Tab page, not a blank tab
         g.hide()
 
+    def test_update_dialog_is_never_a_trap(self):
+        info = {"version": "99.0.0", "url": "https://example.com/x.exe", "sha256": "0" * 64, "size": 1, "mandatory": True,
+                "notes": "n", "path": "/nonexistent/x.exe"}
+        d = S.SpsForcedUpdateDialog(self.w, info)
+        self.assertTrue(d.mandatory); self.assertIsNotNone(d.quit_btn)           # a forced update still has a way out
+        d._allow_later()
+        self.assertFalse(d.mandatory)                                            # after a failed attempt it can be postponed
+        d.reject(); d.deleteLater()
+
     def test_google_signin_is_caught_before_loading(self):
         import sps_signin
         shown = []

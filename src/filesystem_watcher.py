@@ -157,9 +157,9 @@ class PsutilFileMonitor(threading.Thread):
         pid: int,
         permission_callback: Callable[[str, str], bool],
         browser_dir: str,
-        poll_interval: float = 0.4,
-        file_log: Optional[FileAccessLog] = None,
-    ):
+        poll_interval: float = 3.0,      # V40: was 0.4. On Windows each open_files() call walks every handle of the browser
+        file_log: Optional[FileAccessLog] = None,   # (psutil docs: it can hang on some handles; psutil then abandons a stuck thread
+    ):                                              # per call). 2-3 calls a second piled up threads and froze weak PCs.
         super().__init__(daemon=True)
         self.pid                 = pid
         self.permission_callback = permission_callback
@@ -209,6 +209,9 @@ class PsutilFileMonitor(threading.Thread):
     def run(self):
         if not HAS_PSUTIL:
             print("[FileMonitor] psutil not available")
+            return
+        if IS_WINDOWS and os.environ.get("SPS_FILE_MONITOR") != "1":
+            print("[FileMonitor] Windows: open-file polling is OFF by default (it can freeze the PC). Set SPS_FILE_MONITOR=1 to enable.")
             return
         try:
             proc = psutil.Process(self.pid)
@@ -356,7 +359,7 @@ class WatchdogFileMonitor:
             if not Path(d).exists():
                 continue
             obs = Observer()
-            obs.schedule(handler, d, recursive=True)
+            obs.schedule(handler, d, recursive=not IS_WINDOWS)   # V40: only logs; a recursive watch of a synced OneDrive folder floods events
             obs.start()
             self._observers.append(obs)
             print(f"[WatchdogMonitor] Watching: {d}")

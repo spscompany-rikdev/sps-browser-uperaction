@@ -251,6 +251,7 @@ def _v36_updater(self):
             except Exception:
                 pass
         self._v36_upd = sps_updater.SpsUpdater(VERSION, APP_ROOT_DIR, log=_log)
+        self._v36_upd.log_path = os.path.join(BASE_DATA_DIR, "update_log.txt")
     return self._v36_upd
 
 def _v36_start_updater(self):
@@ -336,10 +337,37 @@ class SpsForcedUpdateDialog(QDialog):
         row = QHBoxLayout(); row.addStretch()
         if not self.mandatory:
             later = QPushButton("Later"); later.clicked.connect(self.reject); row.addWidget(later)
+        self.quit_btn = None
+        if self.mandatory:                                    # never a trap: the person can always leave without Task Manager
+            self.quit_btn = QPushButton("Quit SPS Browser"); self.quit_btn.clicked.connect(self._quit_app); row.addWidget(self.quit_btn)
+        show = QPushButton("Show file"); show.setToolTip("Open the folder with the downloaded installer"); show.clicked.connect(self._show_file); row.addWidget(show)
         self.manual = QPushButton("Open installer (manual)"); self.manual.clicked.connect(self._manual); row.addWidget(self.manual)
         self.btn = QPushButton("Update now"); self.btn.setDefault(True)
         self.btn.clicked.connect(self._go); row.addWidget(self.btn)
         lay.addLayout(row)
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        QTimer.singleShot(0, lambda: (self.raise_(), self.activateWindow()))     # never hidden behind the browser window
+
+    def _quit_app(self):
+        os._exit(0)
+
+    def _show_file(self):
+        try:
+            import subprocess
+            p = self.info.get("path") or ""
+            if p and os.path.isfile(p):
+                subprocess.Popen(["explorer", "/select,", os.path.normpath(p)])
+        except Exception as e:
+            print("[SPS V40] show file failed:", e)
+
+    def _allow_later(self):
+        """After a failed install attempt the update is no longer forced: the person can use the browser and try again."""
+        if self.mandatory:
+            self.mandatory = False
+            later = QPushButton("Later"); later.clicked.connect(self.reject)
+            self.layout().itemAt(self.layout().count() - 1).layout().insertWidget(1, later)
 
     def reject(self):
         if self.mandatory:
@@ -414,7 +442,7 @@ class SpsForcedUpdateDialog(QDialog):
                 QTimer.singleShot(1500, lambda: os._exit(0))
             elif time.time() - t0 > 25:
                 t.stop()
-                self.btn.setEnabled(True); self.manual.setEnabled(True)
+                self.btn.setEnabled(True); self.manual.setEnabled(True); self._allow_later()
                 self.win._v36_updater()._log("installer process did NOT appear within 25 s - browser stays open")
                 self.status.setText("The installer did not start (or was closed). The browser stays open.\n"
                                     "Try \"Open installer (manual)\", or run the file shown in the folder yourself.")
@@ -454,7 +482,7 @@ class SpsForcedUpdateDialog(QDialog):
             self.manual.setEnabled(False)
             self._wait_for_installer("Installing... a small progress window appears. SPS Browser closes and opens again by itself.")
         else:
-            self.btn.setEnabled(True)
+            self.btn.setEnabled(True); self._allow_later()
             why = getattr(self.win._v36_updater(), "last_error", "") or "permission refused or the file changed"
             self.status.setText("The update could not start: %s.\nTry again, or use \"Open installer (manual)\"." % why)
 
@@ -521,7 +549,13 @@ class SpsUpdateCheckDialog(QDialog):
             if not getattr(self.win, "_v36_update_dialog_open", False):
                 self.win._v36_update_dialog_open = True
                 try:
-                    SpsForcedUpdateDialog(self.win, data).exec()
+                    d = SpsForcedUpdateDialog(self.win, data)
+                    d.mandatory = False                       # the person asked for this check themselves: always skippable
+                    d.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, True)
+                    later = QPushButton("Later"); later.clicked.connect(d.reject)
+                    d.layout().itemAt(d.layout().count() - 1).layout().insertWidget(1, later)
+                    if d.quit_btn is not None: d.quit_btn.hide()
+                    d.exec()
                 finally:
                     self.win._v36_update_dialog_open = False
         elif kind == "uptodate":
@@ -531,7 +565,8 @@ class SpsUpdateCheckDialog(QDialog):
         else:
             why = str(data or "")
             self.msg.setText("Could not check for updates right now.\nPlease check your internet connection and try again."
-                             + (f"\n\nDetails: {html.escape(why[:200])}" if why and "cancelled" not in why else ""))
+                             + (f"\n\nDetails: {html.escape(why[:200])}" if why and "cancelled" not in why else "")
+                             + "\n\nLog: " + html.escape(str(getattr(self.win._v36_updater(), "log_path", "update_log.txt"))))
 
     def closeEvent(self, ev):
         self._cancel.set(); self._timer.stop()

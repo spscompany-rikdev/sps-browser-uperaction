@@ -21,7 +21,7 @@
 ; ═══════════════════════════════════════════════════════════════════════════
 
 #define APP_NAME        "SPS Browser"
-#define APP_VERSION     "38.0.0"
+#define APP_VERSION     "40.0.0"
 #define APP_PUBLISHER   "SPS Software"
 #define APP_URL         "https://sites.google.com/view/spsbrowserpro"
 #define APP_EXE         "SPS_Browser.exe"
