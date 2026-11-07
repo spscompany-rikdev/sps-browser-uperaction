@@ -56,3 +56,5 @@ Classic white design with a desktop-style toolbar (profile, address bar with loc
 * Android: cookie-banner hiding, page tools (print, print area, share), safer screenshots.
 * Drop-down windows (desktop): `src/sps_dropdown.py` - dialogs open as a rounded drop-down under the toolbar (VPN, downloads, passwords, notes, extensions ...). Settings, updates, print, the big managers, message boxes and file pickers stay normal windows. Switch: Settings > "Drop-down windows".
 * Android: all dialogs use rounded cards with a grow-from-top-right animation (`SpsDialog` style).
+
+* ⚠️ Note on Windows SmartScreen: This application is 100% open-source under the GPL 3.0 license. Because we do not have a paid code-signing certificate yet, Windows may show an "Unknown Publisher" warning. You can safely click More Info -> Run Anyway, or inspect the source code yourself!
