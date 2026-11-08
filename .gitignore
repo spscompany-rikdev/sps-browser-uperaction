@@ -1,0 +1,21 @@
+__pycache__/
+*.pyc
+build/
+dist/
+_generated/
+installer/Output/
+installer/redist/
+*.pfx
+*.p12
+update_private_key*.txt
+selftest_result.txt
+.venv/
+
+# Android build outputs
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+*.jks
+*.keystore
+dist_ext/
