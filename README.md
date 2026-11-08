@@ -76,4 +76,6 @@ Classic white design with a desktop-style toolbar (profile, address bar with loc
 * Android: cookie-banner hiding, page tools (print, print area, share), safer screenshots.
 * Drop-down windows (desktop): `src/sps_dropdown.py` - dialogs open as a rounded drop-down under the toolbar (VPN, downloads, passwords, notes, extensions ...). Settings, updates, print, the big managers, message boxes and file pickers stay normal windows. Switch: Settings > "Drop-down windows".
 * Android: all dialogs use rounded cards with a grow-from-top-right animation (`SpsDialog` style).
-* https://www.virustotal.com/gui/file/48f44394f50c5d0fdfe67b05ac625316d36dfe9edf59b290d291059990c5eafb?nocache=1
+* VirusTotal scan of the installer: 
+ https://www.virustotal.com/gui/file/48f44394f50c5d0fdfe67b05ac625316d36dfe9edf59b290d291059990c5eafb?nocache=1
+ SHA-256: 48f44394f50c5d0fdfe67b05ac625316d36dfe9edf59b290d291059990c5eafb
