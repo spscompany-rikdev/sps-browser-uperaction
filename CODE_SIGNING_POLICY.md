@@ -22,9 +22,9 @@ Free code signing for the Windows files of SPS Browser is provided by [SignPath.
 
 | Role | What they do | Who |
 |---|---|---|
-| Authors (committers) | Write and merge code | [YOUR NAME](https://github.com/spscompany-rikdev) |
-| Reviewers | Review every change that is not from an Author | [YOUR NAME](https://github.com/spscompany-rikdev) and any contributor a Reviewer later adds |
-| Approvers | Approve each signing request by hand | [YOUR NAME](https://github.com/spscompany-rikdev) |
+| Authors (committers) | Write and merge code | [spscompany-rikdev](https://github.com/spscompany-rikdev) |
+| Reviewers | Review every change that is not from an Author | [spscompany-rikdev](https://github.com/spscompany-rikdev) and any contributor a Reviewer later adds |
+| Approvers | Approve each signing request by hand | [spscompany-rikdev](https://github.com/spscompany-rikdev) |
 
 All team members use multi-factor authentication for GitHub and for SignPath.
 
