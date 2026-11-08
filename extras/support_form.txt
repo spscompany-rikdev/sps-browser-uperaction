@@ -1,0 +1,2 @@
+# SPS Browser support form (Google Form). One line only - the link below is opened from Help > Support.
+https://docs.google.com/forms/d/e/1FAIpQLSdaE6lOwXHdDy3WJ5_ZjK0QdLt79omPyTG__wISWb9J9C8eeg/viewform?usp=header

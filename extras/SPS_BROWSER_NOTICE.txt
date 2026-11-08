@@ -1,0 +1,51 @@
+SPS BROWSER - NOTICE
+====================
+
+1. THE PROGRAM
+   SPS Browser (the "Program") is free software. It is licensed under the GNU General Public License,
+   version 3 (GPL-3.0), the full text of which is in the file LICENSE.txt that is installed with the Program and
+   can be read inside the browser (menu: More Features > License & Legal).
+
+   Copyright (C) 2026 the SPS Browser authors.
+
+   You may use, study, share and change the Program under the terms of the GPL-3.0. The Program comes with
+   ABSOLUTELY NO WARRANTY, to the extent permitted by law (see sections 15 and 16 of the GPL-3.0).
+
+2. SOURCE CODE
+   The GPL-3.0 gives every recipient the right to receive the source code of the Program. The source code of this
+   version is published in the project's public repository (the address is shown in the License & Legal window and on
+   the page where you downloaded the installer). If you cannot find it, ask the person who gave you the installer.
+
+3. NAME AND LOGO
+   "SPS Browser" and the SPS Browser logo are names and marks of the SPS Browser authors. The GPL-3.0 gives you
+   the right to change and redistribute the code, but not the right to present a changed version under the same
+   name or logo in a way that could make people believe it is the original (GPL-3.0, section 7, paragraph e).
+   If you distribute a modified version, please give it a different name and logo.
+
+4. THIRD-PARTY SOFTWARE
+   The Program contains and uses software from other projects (Python, Qt, Chromium, llama.cpp and others).
+   Each of them has its own licence. They are listed in the file THIRD_PARTY_NOTICES.txt. Nothing in this notice
+   changes those licences.
+
+5. AI MODELS
+   The Program can run AI language models on your own computer. The models are NOT part of the Program and are not
+   included in the installer. When you press "Download" the model is fetched from its publisher (Hugging Face) and is
+   covered by the model's own licence (for example Apache-2.0, MIT, the Qwen Research License or the Gemma Terms of Use).
+   You are responsible for following the licence of every model you download. AI answers can be wrong - check anything
+   important. The AI assistant in the Program cannot run programs, commands or code on your computer.
+
+6. YOUR DATA AND THE INTERNET
+   Your history, bookmarks, passwords, settings and downloads are stored on your own computer in your profile folders.
+   The Program connects to the internet when you open websites and when you use features that need it, such as the
+   search engine you chose, AI web search, AI model downloads and the extension / script store.
+   The sandbox that starts with the Program keeps a local log of what the browser did on your computer; the log
+   stays on your computer.
+
+7. SECURITY
+   The Program is built on the Chromium engine through Qt WebEngine. Security fixes of that engine reach SPS Browser
+   only when a new version of the Program is released, so keep the Program up to date. No browser can be perfectly secure.
+
+8. WARRANTY AND LIABILITY
+   See sections 15 and 16 of the GPL-3.0 in LICENSE.txt. In short: the Program is provided "as is".
+
+This notice explains the licence situation in plain words. If it ever disagrees with the GPL-3.0, the GPL-3.0 wins.
