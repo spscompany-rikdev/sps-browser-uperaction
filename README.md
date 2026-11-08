@@ -8,6 +8,26 @@
 | publish an update to users | `UPDATE_PAGE_FORMAT.md` |
 | understand code signing / "Unknown publisher" | `TRUSTED_PUBLISHER.md` |
 | compare with Chrome | `CHROME_VS_SPS.md` |
+| see what changed in this version | `WHATS_NEW.md` |
+
+## "Windows protected your PC" (blue screen) when you install - please read
+When you run the installer, Windows may show a **blue screen: "Windows protected your PC - Microsoft Defender SmartScreen prevented an unrecognised app from starting"**.
+
+**This is normal and does not mean the program is a virus.** Windows shows it for every program whose publisher has not bought a paid *code-signing certificate* (it costs money every year). SPS Browser is a free project and does not have one yet, so Windows does not know the publisher - that is the only reason for the warning.
+
+To continue:
+1. Click **More info** (small text in the blue window).
+2. Click **Run anyway**.
+
+The warning goes away on its own over time as more people download the same file.
+
+How you can be sure you have the real file:
+* Only download from this project's official **GitHub Releases** page - never from a link someone sends you.
+* Compare the file's SHA-256 with the one written in the release notes (`certutil -hashfile <installer-file-name>.exe SHA256`).
+* The whole source code is in this package, and every release is built automatically by GitHub from it (`.github/workflows/build.yml`).
+* The browser asks before every website permission (camera, microphone, location ...) and shows what is blocked - see the 🎚️ button.
+
+Details and how a certificate would remove the warning: `TRUSTED_PUBLISHER.md`.
 
 **Folders**
 * `src/` - the program (`SPS_BROWSER.py` + patches, sandbox, updater)
@@ -56,5 +76,3 @@ Classic white design with a desktop-style toolbar (profile, address bar with loc
 * Android: cookie-banner hiding, page tools (print, print area, share), safer screenshots.
 * Drop-down windows (desktop): `src/sps_dropdown.py` - dialogs open as a rounded drop-down under the toolbar (VPN, downloads, passwords, notes, extensions ...). Settings, updates, print, the big managers, message boxes and file pickers stay normal windows. Switch: Settings > "Drop-down windows".
 * Android: all dialogs use rounded cards with a grow-from-top-right animation (`SpsDialog` style).
-
-* ⚠️ Note on Windows SmartScreen: This application is 100% open-source under the GPL 3.0 license. Because we do not have a paid code-signing certificate yet, Windows may show an "Unknown Publisher" warning. You can safely click More Info -> Run Anyway, or inspect the source code yourself!
